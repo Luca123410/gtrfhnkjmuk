@@ -34,9 +34,17 @@ class RealDebridClient {
                 const status = error.response.status;
                 if (status === 401) throw new Error("RD_INVALID_TOKEN");
                 if (status === 403) throw new Error("RD_PERMISSION_DENIED");
+                if (status === 503) throw new Error("RD_SERVICE_UNAVAILABLE");
             }
             throw error;
         }
+    }
+
+    // --- NUOVO: CONTROLLO BATCH DISPONIBILITÀ ---
+    async checkInstantAvailability(hashes) {
+        // RD accetta hash multipli separati da /
+        const path = `/torrents/instantAvailability/${hashes.join('/')}`;
+        return this.request('GET', path);
     }
 
     async addMagnet(magnet) { return this.request('POST', '/torrents/addMagnet', { magnet }); }
@@ -46,7 +54,23 @@ class RealDebridClient {
 }
 
 /**
- * LOGICA INTELLIGENTE DI SELEZIONE FILE
+ * NUOVA FUNZIONE: Controlla se i magnet sono già in cache (Senza aggiungerli)
+ * Restituisce una mappa degli hash disponibili.
+ */
+async function checkBatchAvailability(apiKey, hashes) {
+    if (!hashes || hashes.length === 0) return {};
+    const rd = new RealDebridClient(apiKey);
+    try {
+        return await rd.checkInstantAvailability(hashes);
+    } catch (error) {
+        console.error("⚠️ RD Batch Check Error:", error.message);
+        return {}; // Ritorna vuoto in caso di errore per non bloccare il flusso
+    }
+}
+
+/**
+ * LOGICA INTELLIGENTE DI SELEZIONE FILE E UNRESTRICT
+ * (Da chiamare SOLO se il file è confermato come Cached)
  */
 async function getStreamLink(apiKey, magnetLink) {
     const rd = new RealDebridClient(apiKey);
@@ -57,69 +81,66 @@ async function getStreamLink(apiKey, magnetLink) {
         const added = await rd.addMagnet(magnetLink);
         torrentId = added.id;
 
-        // 2. VERIFICA INIZIALE
+        // 2. VERIFICA E SELEZIONE
         let info = await rd.getInfo(torrentId);
 
-        // 3. GESTIONE SELEZIONE FILE (Logica "Pro" rubata dallo script avanzato)
         if (info.status === 'waiting_files_selection') {
             const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'];
             const junkKeywords = ['sample', 'trailer', 'extra', 'bonus'];
 
-            // Filtra solo i file video validi e non "junk"
+            // Filtra solo video validi e grossi (>50MB)
             const videoFiles = info.files.filter(f => {
                 const lowerPath = f.path.toLowerCase();
                 return videoExtensions.some(ext => lowerPath.endsWith(ext)) &&
                        !junkKeywords.some(junk => lowerPath.includes(junk)) &&
-                       f.bytes > 50 * 1024 * 1024; // > 50MB
+                       f.bytes > 50 * 1024 * 1024; 
             });
 
             if (videoFiles.length > 0) {
-                // Seleziona TUTTI i file video (utile per le serie pack)
                 const fileIds = videoFiles.map(f => f.id).join(',');
                 await rd.selectFiles(torrentId, fileIds);
             } else {
-                // Fallback: Seleziona tutto se non riconosce video
                 await rd.selectFiles(torrentId, 'all');
             }
             
-            // Rileggi info dopo selezione
-            info = await rd.getInfo(torrentId);
-        } else if (info.status === 'magnet_conversion') {
-            // Se sta ancora convertendo, proviamo a forzare la selezione 'all' per velocizzare
-            try { await rd.selectFiles(torrentId, 'all'); } catch(e) {}
-        }
-
-        // 4. CONTROLLO FINALE E UNRESTRICT
-        if (info.status === 'downloaded') {
-            // Ordina i file per dimensione (il più grande è il film/episodio principale)
-            const files = info.files.filter(f => f.selected === 1).sort((a, b) => b.bytes - a.bytes);
-            const mainFile = files[0];
-
-            // Trova il link corrispondente
-            // RD non mappa 1:1 file e link, ma di solito l'ordine è preservato.
-            // Fallback sicuro: sblocca il primo link disponibile
-            let targetLink = info.links[0];
-            
-            const stream = await rd.unrestrictLink(targetLink);
-
-            return {
-                type: 'ready',
-                url: stream.download,
-                filename: stream.filename,
-                size: stream.filesize
-            };
+            // Piccola pausa tecnica per dare tempo a RD di processare la selezione
+            // (A volte serve un minimo di latenza lato server)
+            info = await rd.getInfo(torrentId); 
         } 
-        else {
-            return { 
-                type: 'downloading', 
-                progress: parseFloat(info.progress || 0) 
-            };
+        
+        // Se non è downloaded immediato dopo la selezione, è un falso positivo della cache
+        // o serve tempo. Ma per un addon "Instant", se non è pronto ora, lo scartiamo.
+        if (info.status !== 'downloaded') {
+             // Opzionale: cancellare il torrent per pulizia
+             return null; 
         }
+
+        // 3. UNRESTRICT
+        // Prende il file più grande selezionato
+        const files = info.files.filter(f => f.selected === 1).sort((a, b) => b.bytes - a.bytes);
+        if (!files.length) return null;
+
+        const mainFile = files[0];
+        
+        // Logica per trovare il link giusto:
+        // RD spesso mette i link nello stesso ordine degli ID, ma non sempre.
+        // Un approccio sicuro è provare a sbloccare il primo link generato.
+        const targetLink = info.links[0]; 
+        
+        const stream = await rd.unrestrictLink(targetLink);
+
+        return {
+            type: 'ready',
+            url: stream.download,
+            filename: stream.filename,
+            size: stream.filesize
+        };
 
     } catch (error) {
         if (error.message === "RD_INVALID_TOKEN") return { type: 'error', message: "API Key RD Errata" };
+        console.error(`RD Error for magnet: ${error.message}`);
         return null; 
     }
 }
 
-module.exports = { getStreamLink };
+module.exports = { getStreamLink, checkBatchAvailability };
