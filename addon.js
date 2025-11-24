@@ -25,12 +25,12 @@ const PORT = process.env.PORT || 7000;
 app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// --- MANIFEST (V30 TOTAL WAR) ---
+// --- MANIFEST (V30 TOTAL WAR + MAGIC QUERIES) ---
 const MANIFEST = {
     id: "org.community.corsaro-brain-v30",
-    version: "30.0.0", 
-    name: "Corsaro + Global (V30 FULL SEARCH)",
-    description: "🇮🇹 V30: Rimosso il blocco scalare. Cerca SUBITO ovunque (Corsaro, UIndex, Global) per massimizzare i risultati su film difficili (es. xXx).",
+    version: "30.1.0", 
+    name: "Corsaro + Global (V30 MAGIC)",
+    description: "🇮🇹 V30.1: Total War + Query Magiche. Cerca pack completi, WebDL e formati scena (1x01) per massimizzare i risultati serie TV.",
     resources: ["catalog", "stream"],
     types: ["movie", "series"],
     catalogs: [{ type: "movie", id: "tmdb_trending", name: "Popolari Italia" }],
@@ -209,7 +209,7 @@ const ProviderService = {
         let queries = [];
         const searchYear = metadata.isSeries ? null : metadata.year;
         
-        // FIX PER TITOLI CORTI (Es. "xXx", "21")
+        // FIX PER TITOLI CORTI 
         // Se il titolo è < 4 caratteri, è obbligatorio usare l'anno altrimenti i tracker lo ignorano.
         const cleanTitle = cleanSearchQuery(metadata.title);
         const isShortTitle = cleanTitle.length < 4; 
@@ -217,11 +217,21 @@ const ProviderService = {
         // --- COSTRUZIONE QUERY ---
         if (metadata.isSeries) {
             const s = String(metadata.season).padStart(2, '0');
+            const e = String(metadata.episode).padStart(2, '0'); 
+
+            // 1. Query Standard
             queries.push(`${metadata.title} ITA`);
             queries.push(`${metadata.title} Stagione ${metadata.season}`);
             queries.push(`${metadata.title} S${s}`);
             queries.push(`${metadata.title} Stagioni`);
             
+            // 2. ✨ QUERY MAGICHE (PACKS & WEB-DL) ✨
+            queries.push(`${metadata.title} stagione ${metadata.season} pack ita`);
+            queries.push(`${metadata.title} S${s} completa ita`);
+            queries.push(`${metadata.title} ${metadata.season}x${e} ita`); // Es: 1x05 ita
+            queries.push(`${metadata.title} stagione ${metadata.season} torrent ita webdl`);
+
+            // 3. Original Title
             if (metadata.originalTitle && metadata.originalTitle !== metadata.title) {
                 queries.push(`${metadata.originalTitle} ITA`);
                 queries.push(`${metadata.originalTitle} S${s}`);
@@ -239,12 +249,11 @@ const ProviderService = {
         }
 
         queries = [...new Set(queries)];
-        console.log(`   🔍 Queries V30: ${JSON.stringify(queries)}`);
+        console.log(`   🔍 Queries V30 (+Magic): ${JSON.stringify(queries)}`);
 
         // ============================================
         // V30: TOTAL WAR (PARALLEL EXECUTION)
         // ============================================
-        // Niente "step" o attese. Buttiamo dentro tutto per trovare il massimo.
         let promises = [];
 
         // 1. PROVIDER ITA
@@ -258,7 +267,7 @@ const ProviderService = {
             const cleanTitle = cleanSearchQuery(metadata.title);
             let globalQuery = metadata.isSeries 
                 ? `${cleanTitle} S${String(metadata.season).padStart(2,'0')}` 
-                : `${cleanTitle} ${metadata.year}`; // Per Global usiamo sempre l'anno sui film
+                : `${cleanTitle} ${metadata.year}`; 
             
             const itaQuery = `${cleanSearchQuery(metadata.title)} ITA`;
 
@@ -266,7 +275,7 @@ const ProviderService = {
             promises.push(Knaben.searchMagnet(globalQuery, searchYear).catch(() => []));
             promises.push(Knaben.searchMagnet(itaQuery, searchYear).catch(() => []));
 
-            // APIBAY & TORRENTMAGNET (Sempre attivi in V30)
+            // APIBAY & TORRENTMAGNET
             promises.push(Apibay.searchMagnet(globalQuery, searchYear).catch(() => []));
             promises.push(TorrentMagnet.searchMagnet(globalQuery, searchYear).catch(() => []));
         } else {
@@ -416,5 +425,5 @@ app.get('/:userConf/stream/:type/:id.json', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`🚀 THE BRAIN V30 - FULL SEARCH - Port ${PORT}`);
+    console.log(`🚀 THE BRAIN V30 - FULL SEARCH (MAGIC) - Port ${PORT}`);
 });
