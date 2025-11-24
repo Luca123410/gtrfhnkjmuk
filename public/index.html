@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Corsaro Unleashed - Configurator</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #6366f1; /* Indigo */
+            --primary-hover: #4f46e5;
+            --bg-gradient: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+            --glass-bg: rgba(255, 255, 255, 0.05);
+            --glass-border: rgba(255, 255, 255, 0.1);
+            --text-main: #ffffff;
+            --text-muted: #94a3b8;
+            --success: #10b981;
+            --error: #ef4444;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: var(--bg-gradient);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            overflow-x: hidden;
+        }
+
+        /* Background Blobs Animation */
+        .blob {
+            position: absolute;
+            width: 500px;
+            height: 500px;
+            filter: blur(80px);
+            opacity: 0.4;
+            z-index: -1;
+            animation: float 10s infinite alternate;
+        }
+        .blob-1 { top: -10%; left: -10%; background: purple; }
+        .blob-2 { bottom: -10%; right: -10%; background: blue; animation-delay: -5s; }
+
+        @keyframes float {
+            0% { transform: translate(0, 0) scale(1); }
+            100% { transform: translate(20px, 40px) scale(1.1); }
+        }
+
+        .container {
+            width: 100%;
+            max-width: 600px;
+            background: var(--glass-bg);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid var(--glass-border);
+            border-radius: 24px;
+            padding: 40px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            animation: slideUp 0.6s ease-out;
+        }
+
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(40px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        header { text-align: center; margin-bottom: 40px; }
+        h1 { font-size: 2.5rem; font-weight: 800; margin-bottom: 10px; background: linear-gradient(to right, #a78bfa, #6366f1); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        p.subtitle { color: var(--text-muted); font-size: 1rem; }
+
+        /* SEZIONI */
+        .section-title {
+            font-size: 0.85rem;
+            text-transform: uppercase;
+            letter-spacing: 1.5px;
+            color: var(--text-muted);
+            margin-bottom: 15px;
+            margin-top: 30px;
+            font-weight: 700;
+            border-bottom: 1px solid var(--glass-border);
+            padding-bottom: 5px;
+        }
+
+        /* INPUT FIELDS */
+        .input-group { margin-bottom: 20px; position: relative; }
+        .input-group label { display: block; font-size: 0.9rem; margin-bottom: 8px; font-weight: 500; }
+        .input-field {
+            width: 100%;
+            padding: 14px 16px;
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid var(--glass-border);
+            border-radius: 12px;
+            color: white;
+            font-size: 1rem;
+            transition: all 0.3s;
+        }
+        .input-field:focus { outline: none; border-color: var(--primary); box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.2); background: rgba(0, 0, 0, 0.5); }
+        .input-helper { font-size: 0.8rem; color: var(--text-muted); margin-top: 6px; text-align: right; }
+        .input-helper a { color: var(--primary); text-decoration: none; transition: color 0.2s; }
+        .input-helper a:hover { color: #a5b4fc; text-decoration: underline; }
+
+        /* TOGGLES & OPTIONS */
+        .options-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+        }
+
+        .option-card {
+            background: rgba(255,255,255,0.03);
+            border: 1px solid var(--glass-border);
+            padding: 15px;
+            border-radius: 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            transition: transform 0.2s;
+        }
+        .option-card:hover { background: rgba(255,255,255,0.07); }
+        .option-label { font-size: 0.9rem; font-weight: 500; }
+        
+        /* SWITCH CSS */
+        .switch { position: relative; display: inline-block; width: 44px; height: 24px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider {
+            position: absolute; cursor: pointer;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background-color: #333; transition: .4s; border-radius: 34px;
+        }
+        .slider:before {
+            position: absolute; content: "";
+            height: 18px; width: 18px;
+            left: 3px; bottom: 3px;
+            background-color: white; transition: .4s; border-radius: 50%;
+        }
+        input:checked + .slider { background-color: var(--primary); }
+        input:checked + .slider:before { transform: translateX(20px); }
+
+        /* BUTTONS */
+        .actions { display: flex; flex-direction: column; gap: 15px; margin-top: 40px; }
+        .btn {
+            width: 100%;
+            padding: 16px;
+            border-radius: 14px;
+            font-size: 1.1rem;
+            font-weight: 700;
+            cursor: pointer;
+            border: none;
+            transition: all 0.3s ease;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .btn-primary {
+            background: var(--primary);
+            color: white;
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.4);
+        }
+        .btn-primary:hover { transform: translateY(-2px); background: var(--primary-hover); box-shadow: 0 8px 25px rgba(99, 102, 241, 0.6); }
+
+        .btn-secondary {
+            background: transparent;
+            border: 1px solid var(--glass-border);
+            color: var(--text-muted);
+        }
+        .btn-secondary:hover { border-color: white; color: white; background: rgba(255,255,255,0.05); }
+
+        /* Toast Notification */
+        #toast {
+            visibility: hidden;
+            min-width: 250px;
+            background-color: #333;
+            color: #fff;
+            text-align: center;
+            border-radius: 8px;
+            padding: 16px;
+            position: fixed;
+            z-index: 1;
+            bottom: 30px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 1rem;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            opacity: 0;
+            transition: opacity 0.3s, bottom 0.3s;
+        }
+        #toast.show { visibility: visible; opacity: 1; bottom: 50px; }
+        #toast.success { background-color: var(--success); }
+        #toast.error { background-color: var(--error); }
+
+        @media (max-width: 480px) {
+            .container { padding: 25px; }
+            .options-grid { grid-template-columns: 1fr; }
+            h1 { font-size: 2rem; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="blob blob-1"></div>
+    <div class="blob blob-2"></div>
+
+    <div class="container">
+        <header>
+            <h1>Corsaro Unleashed</h1>
+            <p class="subtitle">La configurazione definitiva per Stremio.<br>Potenza italiana, database globale.</p>
+        </header>
+
+        <div class="section-title">1. Credenziali (Obbligatorie)</div>
+        
+        <div class="input-group">
+            <label>TheMovieDB API Key</label>
+            <input type="text" id="tmdb" class="input-field" placeholder="Es. a1b2c3d4...">
+            <div class="input-helper">Necessaria per i metadati. <a href="https://www.themoviedb.org/settings/api" target="_blank">Ottieni Key</a></div>
+        </div>
+
+        <div class="input-group">
+            <label>Real-Debrid Token</label>
+            <input type="text" id="rd" class="input-field" placeholder="Es. F4K3TOKEN...">
+            <div class="input-helper">Per lo streaming ad alta velocità. <a href="https://real-debrid.com/apitoken" target="_blank">Ottieni Token</a></div>
+        </div>
+
+        <div class="section-title">2. Personalizzazione</div>
+        
+        <div class="options-grid">
+            <div class="option-card">
+                <span class="option-label">Solo Fonti ITA (Corsaro)</span>
+                <label class="switch">
+                    <input type="checkbox" id="onlyIta">
+                    <span class="slider"></span>
+                </label>
+            </div>
+
+            <div class="option-card">
+                <span class="option-label">Rimuovi 4K (Risparmio Dati)</span>
+                <label class="switch">
+                    <input type="checkbox" id="no4k">
+                    <span class="slider"></span>
+                </label>
+            </div>
+
+            <div class="option-card">
+                <span class="option-label">Rimuovi CAM/Screener</span>
+                <label class="switch">
+                    <input type="checkbox" id="noCam" checked>
+                    <span class="slider"></span>
+                </label>
+            </div>
+
+             <div class="option-card">
+                <span class="option-label">Mostra File Fake/Non Verificati</span>
+                <label class="switch">
+                    <input type="checkbox" id="showFake">
+                    <span class="slider"></span>
+                </label>
+            </div>
+        </div>
+
+        <div class="actions">
+            <button class="btn btn-primary" onclick="installAddon()">
+                <span>🚀 INSTALLA SU STREMIO</span>
+            </button>
+            <button class="btn btn-secondary" onclick="copyLink()">
+                <span>📋 Copia Link Configurazione</span>
+            </button>
+        </div>
+    </div>
+
+    <div id="toast">Messaggio</div>
+
+    <script>
+        function getConfig() {
+            const tmdb = document.getElementById('tmdb').value.trim();
+            const rd = document.getElementById('rd').value.trim();
+            
+            // Nuovi Flag
+            const onlyIta = document.getElementById('onlyIta').checked;
+            const no4k = document.getElementById('no4k').checked;
+            const noCam = document.getElementById('noCam').checked;
+            const showFake = document.getElementById('showFake').checked;
+
+            if (!tmdb || !rd) return null;
+
+            // Costruzione oggetto JSON
+            return {
+                tmdb,
+                rd,
+                filters: {
+                    onlyIta,
+                    no4k,
+                    noCam,
+                    showFake
+                }
+            };
+        }
+
+        function getStremioUrl() {
+            const config = getConfig();
+            if (!config) {
+                showToast("⚠️ Inserisci API Key e Token RD!", "error");
+                return null;
+            }
+            const configStr = btoa(JSON.stringify(config));
+            const host = window.location.host;
+            return `stremio://${host}/${configStr}/manifest.json`;
+        }
+
+        function installAddon() {
+            const url = getStremioUrl();
+            if(url) window.location.href = url;
+        }
+
+        function copyLink() {
+            const url = getStremioUrl();
+            if (!url) return;
+            
+            // Hack per copiare su mobile/https non sicuro
+            const textArea = document.createElement("textarea");
+            textArea.value = url;
+            document.body.appendChild(textArea);
+            textArea.select();
+            try {
+                document.execCommand('copy');
+                showToast("✅ Link copiato negli appunti!", "success");
+            } catch (err) {
+                showToast("❌ Impossibile copiare", "error");
+            }
+            document.body.removeChild(textArea);
+        }
+
+        function showToast(msg, type) {
+            const t = document.getElementById("toast");
+            t.innerText = msg;
+            t.className = "show " + type;
+            setTimeout(() => { t.className = t.className.replace("show", ""); }, 3000);
+        }
+    </script>
+</body>
+</html>

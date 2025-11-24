@@ -1,0 +1,22 @@
+{
+  "name": "stremio-corsaro-unleashed",
+  "version": "22.0.1",
+  "description": "Addon Stremio Corsaro + RD (TURBO + CACHE)",
+  "main": "addon.js",
+  "scripts": {
+    "start": "node addon.js",
+    "dev": "nodemon addon.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "cors": "^2.8.5",
+    "axios": "^1.6.8",
+    "cheerio": "^1.0.0-rc.12",
+    "node-cache": "^5.1.2",
+    "string-similarity": "^4.0.4",
+    "stremio-addon-sdk": "^1.6.9"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
