@@ -25,7 +25,7 @@ const PORT = process.env.PORT || 7000;
 app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// --- MANIFEST ---
+// --- MANIFEST (ORIGINALE V29) ---
 const MANIFEST = {
     id: "org.community.corsaro-brain-v29",
     version: "29.0.0", 
@@ -89,7 +89,6 @@ const Brain = {
         const eStr = String(e).padStart(2, '0');
 
         // 1. CHECK MULTI-STAGIONE (Es: "Stagioni 1-4", "S01-S03")
-        // Fondamentale per trovare i pack giganti del Corsaro
         const multiSeasonRegex = /(?:s|stagion[ie]|seasons?)\s*(\d{1,2})\s*(?:a|to|thru|e|-)\s*(?:s|stagion[ie]|seasons?)?\s*(\d{1,2})/i;
         const multiMatch = title.match(multiSeasonRegex);
         if (multiMatch) {
@@ -99,7 +98,6 @@ const Brain = {
         }
 
         // 2. CHECK STAGIONE SPECIFICA
-        // Deve contenere "S01", "Stagione 1", "1 Stagione", "Season 1"
         const seasonPatterns = [
             `s${sStr}`,          // S01
             `s${s} `,            // S1 (con spazio dopo)
@@ -121,18 +119,12 @@ const Brain = {
         }
 
         // 3. CHECK EPISODIO (Esclusione)
-        // Se è un pack stagionale (Stagione 1 Completa), NON deve avere "E05" se noi cerchiamo altro.
-        // Ma se cerchiamo E01 e il pack non ha numeri, va bene.
-        
-        // Cerchiamo se c'è un'indicazione di episodio SPECIFICO nel titolo
         const epMatch = title.match(/\b(?:e|ep|episodio|x)\s*(\d{1,3})\b/i);
         
         if (epMatch) {
             const foundEp = parseInt(epMatch[1]);
-            // Se c'è scritto un episodio, deve essere quello che cerchiamo
             if (foundEp === e) return true; 
             
-            // O deve essere un range che lo include (E01-E10)
             const rangeRegex = /(?:e|x)(\d{1,3})\s*(?:-|al?)\s*(?:e|x)?(\d{1,3})/i;
             const rangeMatch = title.match(rangeRegex);
             if (rangeMatch && e >= parseInt(rangeMatch[1]) && e <= parseInt(rangeMatch[2])) return true;
@@ -140,8 +132,6 @@ const Brain = {
             return false; // È un episodio diverso
         }
 
-        // Se arriviamo qui: C'è la stagione giusta, e NON c'è un episodio specifico.
-        // Quindi è un SEASON PACK o una SERIE COMPLETA. Accettiamo!
         return true;
     },
 
@@ -156,7 +146,6 @@ const Brain = {
         let lang = [];
         if (t.includes("ita")) lang.push("ITA 🇮🇹");
         if (t.includes("multi")) lang.push("MULTI 🌐");
-        // Se non c'è scritto nulla, assumiamo ENG se non proviene da provider italiani
         if (!t.includes("ita") && !t.includes("multi")) lang.push("ENG/SUB 🇬🇧");
         
         return { quality, lang };
@@ -211,30 +200,29 @@ const ProviderService = {
         let queries = [];
         const searchYear = metadata.isSeries ? null : metadata.year;
 
-        // --- STRATEGIA ITA HUNTER (V29) ---
+        // --- STRATEGIA ITA HUNTER (V29 ORIGINALE) ---
         if (metadata.isSeries) {
             const s = String(metadata.season).padStart(2, '0');
             
-            // 1. TITOLO + ITA (Obbligatorio per UIndex)
+            // 1. TITOLO + ITA
             queries.push(`${metadata.title} ITA`);
 
-            // 2. TITOLO + STAGIONE (Specifico per Il Corsaro)
-            // Il Corsaro ha titoli tipo "Stranger Things Stagione 1" senza la scritta ITA a volte
+            // 2. TITOLO + STAGIONE
             queries.push(`${metadata.title} Stagione ${metadata.season}`);
             queries.push(`${metadata.title} S${s}`);
 
-            // 3. TITOLO + STAGIONI (Plurale, per i mega pack)
+            // 3. TITOLO + STAGIONI
             queries.push(`${metadata.title} Stagioni`);
 
-            // 4. TITOLO ORIGINALE (Se diverso)
+            // 4. TITOLO ORIGINALE
             if (metadata.originalTitle && metadata.originalTitle !== metadata.title) {
                 queries.push(`${metadata.originalTitle} ITA`);
                 queries.push(`${metadata.originalTitle} Stagione ${metadata.season}`);
             }
         } else {
             // Film
-            queries.push(`${metadata.title} ITA`); // Prima ITA
-            queries.push(`${metadata.title} ${metadata.year}`); // Poi generico
+            queries.push(`${metadata.title} ITA`); 
+            queries.push(`${metadata.title} ${metadata.year}`); 
             if (metadata.originalTitle && metadata.originalTitle !== metadata.title) {
                 queries.push(`${metadata.originalTitle} ITA`);
             }
@@ -246,15 +234,13 @@ const ProviderService = {
         let promises = [];
 
         // 1. CORSARO & UINDEX: Eseguono TUTTE le query
-        // Questo è il segreto: chiedere specificamente "Stagione 1" al Corsaro lo forza a trovarla
         queries.forEach(q => {
             promises.push(Corsaro.searchMagnet(q, searchYear).catch(() => []));
             promises.push(UIndex.searchMagnet(q, searchYear).catch(() => []));
         });
 
-        // 2. GLOBAL (Knaben, etc): Solo query "Pulita" + ITA o Sxx
-        // Non vogliamo spazzatura, vogliamo solo se c'è ITA o Multi
-        if (!filters.onlyIta) { // Se l'utente accetta anche non ITA, cerchiamo Sxx
+        // 2. GLOBAL (Knaben, etc): Logica Originale V29
+        if (!filters.onlyIta) { 
             const cleanTitle = cleanSearchQuery(metadata.title);
             let globalQuery = metadata.isSeries ? `${cleanTitle} S${String(metadata.season).padStart(2,'0')}` : `${cleanTitle} ${metadata.year}`;
             
@@ -262,10 +248,8 @@ const ProviderService = {
             promises.push(Apibay.searchMagnet(globalQuery, searchYear).catch(() => []));
             promises.push(TorrentMagnet.searchMagnet(globalQuery, searchYear).catch(() => []));
         } else {
-            // Se vuole SOLO ITA, proviamo a chiedere ai globali "Titolo ITA"
             const itaQuery = `${cleanSearchQuery(metadata.title)} ITA`;
             promises.push(Knaben.searchMagnet(itaQuery, searchYear).catch(() => []));
-            // Apibay/TorrentMagnet spesso non hanno tag ITA precisi, meglio evitare per non avere falsi positivi
         }
 
         const resultsArray = await Promise.all(promises);
@@ -278,15 +262,32 @@ const StreamService = {
         const filters = config.filters || {};
         const REAL_SIZE_FILTER = metadata.isSeries ? 50 * 1024 * 1024 : 200 * 1024 * 1024;
 
+        // ============================================
+        // 1. LOGICA MERGE SORGENTI (Richiesta Utente)
+        // ============================================
         const uniqueMap = new Map();
         for (const item of results) {
             const hashMatch = item.magnet.match(/btih:([A-F0-9]{40})/i);
             const hash = hashMatch ? hashMatch[1].toUpperCase() : null;
-            if (hash && !uniqueMap.has(hash)) uniqueMap.set(hash, item);
+            
+            if (hash) {
+                if (uniqueMap.has(hash)) {
+                    // SE L'HASH ESISTE GIÀ:
+                    // Invece di ignorare, aggiungiamo il nome del nuovo provider alla stringa "source"
+                    // Esempio: diventa "Corsaro | Knaben"
+                    const existing = uniqueMap.get(hash);
+                    if (!existing.source.includes(item.source)) {
+                        existing.source += ` | ${item.source}`;
+                    }
+                } else {
+                    // NUOVO HASH
+                    uniqueMap.set(hash, item);
+                }
+            }
         }
         let uniqueResults = Array.from(uniqueMap.values());
 
-        // BRAIN FILTERING (Matching Stagione/Episodio)
+        // BRAIN FILTERING
         if (metadata.isSeries) {
             uniqueResults = uniqueResults.filter(item => 
                 Brain.isEpisodeMatch(item.title, metadata.season, metadata.episode)
@@ -303,8 +304,8 @@ const StreamService = {
             const itaA = infoA.lang.some(l => l.includes("ITA")) ? 1 : 0;
             const itaB = infoB.lang.some(l => l.includes("ITA")) ? 1 : 0;
             
-            if (itaA !== itaB) return itaB - itaA; // ITA in cima
-            return (b.sizeBytes || 0) - (a.sizeBytes || 0); // Poi i file più grossi (Pack)
+            if (itaA !== itaB) return itaB - itaA; 
+            return (b.sizeBytes || 0) - (a.sizeBytes || 0); 
         });
         
         const candidates = uniqueResults.slice(0, 50); 
@@ -312,56 +313,53 @@ const StreamService = {
 
         for (const item of candidates) {
             try {
-                // Recuperiamo info lingua PRIMA di chiamare RD
                 const info = Brain.extractInfo(item.title);
                 const isIta = info.lang.some(l => l.includes("ITA"));
-
-                // Se l'utente vuole SOLO ITA (implicito nella tua richiesta), scartiamo i non-ITA
-                // A meno che non sia MULTI
                 const isMulti = info.lang.some(l => l.includes("MULTI"));
-                if (!isIta && !isMulti && item.source !== "Corsaro") {
-                     // Se viene dal Corsaro ci fidiamo che sia ITA anche se non c'è scritto
-                     // Altrimenti, se Knaben ci da un file ENG puro, lo saltiamo se siamo in modalità "Solo ITA"
-                     // (Assumiamo true per questo caso d'uso)
-                     // continue; <--- Scommenta se vuoi essere draconiano
+                
+                // Se non è ITA/MULTI e non contiene "Corsaro" nel nome sorgente (che ora può essere composto), controlliamo
+                if (!isIta && !isMulti && !item.source.includes("Corsaro")) {
+                     // Logica opzionale skip
                 }
 
+                // CHECK RD
                 const streamData = await RD.getStreamLink(config.rd, item.magnet);
-                if (streamData && streamData.type === 'ready' && streamData.size < REAL_SIZE_FILTER) continue;
 
-                const fileTitle = streamData?.filename || item.title;
-                // Ricalcoliamo info sul file vero (magari il torrent dice ITA ma il file no, o viceversa)
+                // ============================================
+                // 2. LOGICA CACHE RIGOROSA (Richiesta Utente)
+                // ============================================
+                // Se non c'è streamData o il file non è 'ready', LO SCARTIAMO.
+                // Non mostriamo nulla che richieda download.
+                if (!streamData) continue;
+                if (streamData.type !== 'ready') continue;
+                
+                // Filtro dimensione spazzatura
+                if (streamData.size < REAL_SIZE_FILTER) continue;
+
+                const fileTitle = streamData.filename || item.title;
                 const finalInfo = Brain.extractInfo(fileTitle); 
 
                 let displayLang = finalInfo.lang.join(" / ");
                 if (!displayLang) {
-                    if (item.source === "Corsaro") displayLang = "ITA 🇮🇹"; // Corsaro è sempre ITA
-                    else if (item.source === "UIndex" && item.title.includes("ITA")) displayLang = "ITA 🇮🇹";
+                    if (item.source.includes("Corsaro")) displayLang = "ITA 🇮🇹";
+                    else if (item.source.includes("UIndex") && item.title.includes("ITA")) displayLang = "ITA 🇮🇹";
                     else displayLang = "ENG/MULTI ❓";
                 }
 
+                // Mostriamo TUTTI i provider che hanno trovato il file (es. "Corsaro | Knaben")
                 let nameTag = `[RD ⚡] ${item.source}\n${finalInfo.quality}`;
-                if (!streamData) nameTag = `[RD ⏳] ${item.source}\n${finalInfo.quality}`;
 
                 let titleStr = `${fileTitle}\n`;
-                titleStr += `💾 ${streamData?.size ? formatBytes(streamData.size) : (item.size || "??")}\n`;
+                titleStr += `💾 ${formatBytes(streamData.size)}\n`;
                 titleStr += `🔊 ${displayLang}`;
 
-                if (streamData) {
-                    streams.push({
-                        name: nameTag,
-                        title: titleStr,
-                        url: streamData.url,
-                        behaviorHints: { notWebReady: false }
-                    });
-                } else if (filters.showFake) {
-                    streams.push({
-                        name: nameTag.replace('⚡', '⚠️'),
-                        title: `${titleStr}\n⚠️ Download Richiesto`,
-                        url: item.magnet,
-                        behaviorHints: { notWebReady: true }
-                    });
-                }
+                streams.push({
+                    name: nameTag,
+                    title: titleStr,
+                    url: streamData.url,
+                    behaviorHints: { notWebReady: false }
+                });
+                
                 await wait(20); 
             } catch (e) {}
         }
@@ -408,13 +406,13 @@ app.get('/:userConf/stream/:type/:id.json', async (req, res) => {
 
         const rawResults = await ProviderService.search(metadata, config.filters || {});
         if (rawResults.length === 0) {
-            const noRes = { streams: [{ title: "🚫 Nessun risultato ITA (V29)" }] };
+            const noRes = { streams: [{ title: "🚫 Nessun risultato ITA" }] };
             CACHE.streams.set(cacheKey, noRes, 300);
             return res.json(noRes);
         }
 
         const streams = await StreamService.processResults(rawResults, metadata, config);
-        const response = streams.length > 0 ? { streams } : { streams: [{ title: "🚫 Nessun file valido trovato (V29)" }] };
+        const response = streams.length > 0 ? { streams } : { streams: [{ title: "🚫 Nessun file CACHED trovato" }] };
 
         CACHE.streams.set(cacheKey, response);
         res.setHeader('Access-Control-Allow-Origin', '*');
