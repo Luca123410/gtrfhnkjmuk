@@ -25,12 +25,12 @@ const PORT = process.env.PORT || 7000;
 app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// --- MANIFEST (ORIGINALE V29) ---
+// --- MANIFEST (V30 TOTAL WAR) ---
 const MANIFEST = {
-    id: "org.community.corsaro-brain-v29",
-    version: "29.0.0", 
-    name: "Corsaro + Global (V29 ITA HUNTER)",
-    description: "🇮🇹 V29: Logica ITA HUNTER. Forza la ricerca di 'Stagione X', 'ITA', 'Pack'. Ottimizzato per trovare tutto ciò che esiste in italiano.",
+    id: "org.community.corsaro-brain-v30",
+    version: "30.0.0", 
+    name: "Corsaro + Global (V30 FULL SEARCH)",
+    description: "🇮🇹 V30: Rimosso il blocco scalare. Cerca SUBITO ovunque (Corsaro, UIndex, Global) per massimizzare i risultati su film difficili (es. xXx).",
     resources: ["catalog", "stream"],
     types: ["movie", "series"],
     catalogs: [{ type: "movie", id: "tmdb_trending", name: "Popolari Italia" }],
@@ -65,14 +65,13 @@ function cleanSearchQuery(query) {
 }
 
 // ==========================================
-// 🧠 THE BRAIN: ITALIAN SMART MATCHING (V29)
+// 🧠 THE BRAIN: MATCHING INTELLIGENTE
 // ==========================================
 
 const Brain = {
     isEpisodeMatch: (torrentTitle, season, episode) => {
         if (!torrentTitle) return false;
         
-        // Normalizzazione aggressiva per l'italiano
         const title = torrentTitle.toLowerCase()
             .replace(/\./g, ' ')
             .replace(/-/g, ' ')
@@ -86,9 +85,8 @@ const Brain = {
         const s = parseInt(season);
         const e = parseInt(episode);
         const sStr = String(s).padStart(2, '0');
-        const eStr = String(e).padStart(2, '0');
 
-        // 1. CHECK MULTI-STAGIONE (Es: "Stagioni 1-4", "S01-S03")
+        // 1. CHECK MULTI-STAGIONE
         const multiSeasonRegex = /(?:s|stagion[ie]|seasons?)\s*(\d{1,2})\s*(?:a|to|thru|e|-)\s*(?:s|stagion[ie]|seasons?)?\s*(\d{1,2})/i;
         const multiMatch = title.match(multiSeasonRegex);
         if (multiMatch) {
@@ -99,26 +97,30 @@ const Brain = {
 
         // 2. CHECK STAGIONE SPECIFICA
         const seasonPatterns = [
-            `s${sStr}`,          // S01
-            `s${s} `,            // S1 (con spazio dopo)
-            `stagione ${s}`,     // Stagione 1
-            `stagione ${sStr}`,  // Stagione 01
-            `${s}\\^ stagione`,  // 1^ Stagione
-            `season ${s}`,       // Season 1
-            `serie completa`,    // Serie Completa
+            `s${sStr}`,          
+            `s${s} `,            
+            `stagione ${s}`,     
+            `stagione ${sStr}`,  
+            `${s}\\^ stagione`,  
+            `season ${s}`,       
+            `serie completa`,    
             `complete series`
         ];
 
         const hasSeason = seasonPatterns.some(p => title.includes(p));
         
         if (!hasSeason) {
-            // Ultima spiaggia: se il titolo ha S01E05 tutto attaccato
             if (!new RegExp(`s${sStr}e`, 'i').test(title) && !new RegExp(`${s}x`, 'i').test(title)) {
                 return false;
             }
         }
 
-        // 3. CHECK EPISODIO (Esclusione)
+        // PACK DETECTION
+        if (hasSeason && (title.includes("pack") || title.includes("completa") || title.includes("complete") || title.includes("tutta"))) {
+            return true;
+        }
+
+        // 3. CHECK EPISODIO
         const epMatch = title.match(/\b(?:e|ep|episodio|x)\s*(\d{1,3})\b/i);
         
         if (epMatch) {
@@ -129,7 +131,7 @@ const Brain = {
             const rangeMatch = title.match(rangeRegex);
             if (rangeMatch && e >= parseInt(rangeMatch[1]) && e <= parseInt(rangeMatch[2])) return true;
 
-            return false; // È un episodio diverso
+            return false; 
         }
 
         return true;
@@ -144,9 +146,16 @@ const Brain = {
         else if (t.includes("480p") || t.includes("sd")) quality = "SD";
         
         let lang = [];
-        if (t.includes("ita")) lang.push("ITA 🇮🇹");
-        if (t.includes("multi")) lang.push("MULTI 🌐");
-        if (!t.includes("ita") && !t.includes("multi")) lang.push("ENG/SUB 🇬🇧");
+
+        if (t.includes("sub ita") || t.includes("subita") || t.includes("vose")) {
+            lang.push("SUB-ITA 🇮🇹");
+        } else if (t.includes("ita") || t.includes("italian") || t.includes("itali")) {
+            lang.push("ITA 🇮🇹");
+        }
+
+        if (t.includes("multi") || t.includes("mux") || t.includes("mxt")) lang.push("MULTI 🌐");
+        
+        if (lang.length === 0) lang.push("ENG/SUB 🇬🇧");
         
         return { quality, lang };
     }
@@ -199,57 +208,71 @@ const ProviderService = {
     search: async (metadata, filters) => {
         let queries = [];
         const searchYear = metadata.isSeries ? null : metadata.year;
+        
+        // FIX PER TITOLI CORTI (Es. "xXx", "21")
+        // Se il titolo è < 4 caratteri, è obbligatorio usare l'anno altrimenti i tracker lo ignorano.
+        const cleanTitle = cleanSearchQuery(metadata.title);
+        const isShortTitle = cleanTitle.length < 4; 
 
-        // --- STRATEGIA ITA HUNTER (V29 ORIGINALE) ---
+        // --- COSTRUZIONE QUERY ---
         if (metadata.isSeries) {
             const s = String(metadata.season).padStart(2, '0');
-            
-            // 1. TITOLO + ITA
             queries.push(`${metadata.title} ITA`);
-
-            // 2. TITOLO + STAGIONE
             queries.push(`${metadata.title} Stagione ${metadata.season}`);
             queries.push(`${metadata.title} S${s}`);
-
-            // 3. TITOLO + STAGIONI
             queries.push(`${metadata.title} Stagioni`);
-
-            // 4. TITOLO ORIGINALE
+            
             if (metadata.originalTitle && metadata.originalTitle !== metadata.title) {
                 queries.push(`${metadata.originalTitle} ITA`);
-                queries.push(`${metadata.originalTitle} Stagione ${metadata.season}`);
+                queries.push(`${metadata.originalTitle} S${s}`);
             }
         } else {
-            // Film
-            queries.push(`${metadata.title} ITA`); 
-            queries.push(`${metadata.title} ${metadata.year}`); 
+            // MOVIE
+            if (!isShortTitle) queries.push(`${metadata.title} ITA`); // Solo se titolo lungo
+            queries.push(`${metadata.title} ${metadata.year}`); // Fondamentale per xXx
+            queries.push(`${metadata.title} ITA ${metadata.year}`); 
+            
             if (metadata.originalTitle && metadata.originalTitle !== metadata.title) {
                 queries.push(`${metadata.originalTitle} ITA`);
+                queries.push(`${metadata.originalTitle} ${metadata.year}`);
             }
         }
 
         queries = [...new Set(queries)];
-        console.log(`   🔍 Queries ITA HUNTER: ${JSON.stringify(queries)}`);
+        console.log(`   🔍 Queries V30: ${JSON.stringify(queries)}`);
 
+        // ============================================
+        // V30: TOTAL WAR (PARALLEL EXECUTION)
+        // ============================================
+        // Niente "step" o attese. Buttiamo dentro tutto per trovare il massimo.
         let promises = [];
 
-        // 1. CORSARO & UINDEX: Eseguono TUTTE le query
+        // 1. PROVIDER ITA
         queries.forEach(q => {
             promises.push(Corsaro.searchMagnet(q, searchYear).catch(() => []));
             promises.push(UIndex.searchMagnet(q, searchYear).catch(() => []));
         });
 
-        // 2. GLOBAL (Knaben, etc): Logica Originale V29
-        if (!filters.onlyIta) { 
+        // 2. PROVIDER GLOBAL (Se non filtrati)
+        if (!filters.onlyIta) {
             const cleanTitle = cleanSearchQuery(metadata.title);
-            let globalQuery = metadata.isSeries ? `${cleanTitle} S${String(metadata.season).padStart(2,'0')}` : `${cleanTitle} ${metadata.year}`;
+            let globalQuery = metadata.isSeries 
+                ? `${cleanTitle} S${String(metadata.season).padStart(2,'0')}` 
+                : `${cleanTitle} ${metadata.year}`; // Per Global usiamo sempre l'anno sui film
             
+            const itaQuery = `${cleanSearchQuery(metadata.title)} ITA`;
+
+            // KNABEN
             promises.push(Knaben.searchMagnet(globalQuery, searchYear).catch(() => []));
+            promises.push(Knaben.searchMagnet(itaQuery, searchYear).catch(() => []));
+
+            // APIBAY & TORRENTMAGNET (Sempre attivi in V30)
             promises.push(Apibay.searchMagnet(globalQuery, searchYear).catch(() => []));
             promises.push(TorrentMagnet.searchMagnet(globalQuery, searchYear).catch(() => []));
         } else {
-            const itaQuery = `${cleanSearchQuery(metadata.title)} ITA`;
-            promises.push(Knaben.searchMagnet(itaQuery, searchYear).catch(() => []));
+            // Se "onlyIta", proviamo Knaben in mode ITA come backup
+             const itaQuery = `${cleanSearchQuery(metadata.title)} ITA`;
+             promises.push(Knaben.searchMagnet(itaQuery, searchYear).catch(() => []));
         }
 
         const resultsArray = await Promise.all(promises);
@@ -262,32 +285,18 @@ const StreamService = {
         const filters = config.filters || {};
         const REAL_SIZE_FILTER = metadata.isSeries ? 50 * 1024 * 1024 : 200 * 1024 * 1024;
 
-        // ============================================
-        // 1. LOGICA MERGE SORGENTI (Richiesta Utente)
-        // ============================================
+        // UNICITÀ (Mantiene il primo trovato)
         const uniqueMap = new Map();
         for (const item of results) {
             const hashMatch = item.magnet.match(/btih:([A-F0-9]{40})/i);
             const hash = hashMatch ? hashMatch[1].toUpperCase() : null;
-            
-            if (hash) {
-                if (uniqueMap.has(hash)) {
-                    // SE L'HASH ESISTE GIÀ:
-                    // Invece di ignorare, aggiungiamo il nome del nuovo provider alla stringa "source"
-                    // Esempio: diventa "Corsaro | Knaben"
-                    const existing = uniqueMap.get(hash);
-                    if (!existing.source.includes(item.source)) {
-                        existing.source += ` | ${item.source}`;
-                    }
-                } else {
-                    // NUOVO HASH
-                    uniqueMap.set(hash, item);
-                }
+            if (hash && !uniqueMap.has(hash)) {
+                uniqueMap.set(hash, item);
             }
         }
         let uniqueResults = Array.from(uniqueMap.values());
 
-        // BRAIN FILTERING
+        // FILTRO EPISODIO
         if (metadata.isSeries) {
             uniqueResults = uniqueResults.filter(item => 
                 Brain.isEpisodeMatch(item.title, metadata.season, metadata.episode)
@@ -297,43 +306,27 @@ const StreamService = {
         if (filters.no4k) uniqueResults = uniqueResults.filter(i => !/2160p|4k|uhd/i.test(i.title));
         if (filters.noCam) uniqueResults = uniqueResults.filter(i => !/cam|dvdscr|telesync/i.test(i.title));
 
-        // Ordinamento: ITA prima di tutto, poi Dimensione
+        // ORDINAMENTO V30
+        // 1. ITA
+        // 2. Seeders (se disponibili, ma spesso non affidabili) -> Size
         uniqueResults.sort((a, b) => {
             const infoA = Brain.extractInfo(a.title);
             const infoB = Brain.extractInfo(b.title);
             const itaA = infoA.lang.some(l => l.includes("ITA")) ? 1 : 0;
             const itaB = infoB.lang.some(l => l.includes("ITA")) ? 1 : 0;
             
-            if (itaA !== itaB) return itaB - itaA; 
-            return (b.sizeBytes || 0) - (a.sizeBytes || 0); 
+            if (itaA !== itaB) return itaB - itaA; // Prima ITA
+            return (b.sizeBytes || 0) - (a.sizeBytes || 0); // Poi Grandezza
         });
         
-        const candidates = uniqueResults.slice(0, 50); 
+        const candidates = uniqueResults.slice(0, 60); // Aumentato limite a 60
         let streams = [];
 
         for (const item of candidates) {
             try {
-                const info = Brain.extractInfo(item.title);
-                const isIta = info.lang.some(l => l.includes("ITA"));
-                const isMulti = info.lang.some(l => l.includes("MULTI"));
-                
-                // Se non è ITA/MULTI e non contiene "Corsaro" nel nome sorgente (che ora può essere composto), controlliamo
-                if (!isIta && !isMulti && !item.source.includes("Corsaro")) {
-                     // Logica opzionale skip
-                }
-
-                // CHECK RD
                 const streamData = await RD.getStreamLink(config.rd, item.magnet);
-
-                // ============================================
-                // 2. LOGICA CACHE RIGOROSA (Richiesta Utente)
-                // ============================================
-                // Se non c'è streamData o il file non è 'ready', LO SCARTIAMO.
-                // Non mostriamo nulla che richieda download.
                 if (!streamData) continue;
-                if (streamData.type !== 'ready') continue;
-                
-                // Filtro dimensione spazzatura
+                if (streamData.type !== 'ready') continue; // Solo Cached
                 if (streamData.size < REAL_SIZE_FILTER) continue;
 
                 const fileTitle = streamData.filename || item.title;
@@ -346,7 +339,6 @@ const StreamService = {
                     else displayLang = "ENG/MULTI ❓";
                 }
 
-                // Mostriamo TUTTI i provider che hanno trovato il file (es. "Corsaro | Knaben")
                 let nameTag = `[RD ⚡] ${item.source}\n${finalInfo.quality}`;
 
                 let titleStr = `${fileTitle}\n`;
@@ -424,5 +416,5 @@ app.get('/:userConf/stream/:type/:id.json', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`🚀 THE BRAIN V29 - ITA HUNTER - Port ${PORT}`);
+    console.log(`🚀 THE BRAIN V30 - FULL SEARCH - Port ${PORT}`);
 });
