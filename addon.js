@@ -16,23 +16,8 @@ const Knaben = require("./knaben");
 const CACHE = {
     streams: new NodeCache({ stdTTL: 1800, checkperiod: 300 }), // 30 min
     catalog: new NodeCache({ stdTTL: 43200, checkperiod: 3600 }), // 12 ore
-    metadata: new NodeCache({ stdTTL: 86400, checkperiod: 3600 }), // 24 ore
-    rd_results: new NodeCache({ stdTTL: 86400, checkperiod: 3600 }) // Cache verifiche RD
+    metadata: new NodeCache({ stdTTL: 86400, checkperiod: 3600 }) // 24 ore
 };
-
-// --- BLACKLIST HASH (Magnet spazzatura noti) ---
-const BLACKLIST_HASH = new Set([
-    "AB45F90F12345F00000000000000000000000000", 
-]);
-
-// LISTA TRACKERS DI FALLBACK
-const BEST_TRACKERS = [
-    "udp://tracker.opentrackr.org:1337/announce",
-    "udp://9.rarbg.to:2920/announce",
-    "udp://tracker.coppersurfer.tk:6969/announce",
-    "udp://tracker.leechers-paradise.org:6969/announce",
-    "udp://tracker.internetwarriors.net:1337/announce"
-];
 
 const app = express();
 const PORT = process.env.PORT || 7000;
@@ -40,18 +25,15 @@ const PORT = process.env.PORT || 7000;
 app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// --- MANIFEST (V31.5 STABLE) ---
+// --- MANIFEST ---
 const MANIFEST = {
-    id: "org.community.corsaro-brain-v31-stable",
-    version: "31.5.0", 
-    name: "Corsaro + Global (V31.5 SMART ABORT)",
-    description: "🇮🇹 V31.5: Strategia Smart Abort. Se RD limita, restituisce subito i risultati validi.",
+    id: "org.community.corsaro-brain-v32",
+    version: "32.0.0", 
+    name: "Corsaro + Global (V32 SAFE)",
+    description: "🇮🇹 V32: Fix critico Loop 429. Ritardo preventivo obbligatorio. Solo Cache Strict.",
     resources: ["catalog", "stream"],
-    types: ["movie", "series", "anime"],
-    catalogs: [
-        { type: "movie", id: "tmdb_trending", name: "Popolari Italia" },
-        { type: "series", id: "tmdb_trending_series", name: "Serie TV Popolari" }
-    ],
+    types: ["movie", "series"],
+    catalogs: [{ type: "movie", id: "tmdb_trending", name: "Popolari Italia" }],
     idPrefixes: ["tmdb", "tt"],
     behaviorHints: { configurable: true, configurationRequired: true }
 };
@@ -82,76 +64,26 @@ function cleanSearchQuery(query) {
         .trim();
 }
 
-function enrichMagnet(magnet) {
-    if (!magnet.startsWith("magnet:?")) return magnet;
-    const trParams = BEST_TRACKERS.map(t => `&tr=${encodeURIComponent(t)}`).join("");
-    return magnet + trParams;
-}
-
+// [V30] Calcolo Similarità Stringhe
 function similar(a, b) {
     if (!a || !b) return 0;
-    a = a.toLowerCase();
-    b = b.toLowerCase();
+    const cleanA = a.toLowerCase().replace(/[^a-z0-9 ]/g, " ").trim();
+    const cleanB = b.toLowerCase();
+    const words = cleanA.split(" ").filter(w => w.length > 1);
+    if (words.length === 0) return 0;
     let matches = 0;
-    const wordsA = a.split(/\W+/).filter(w => w.length > 2);
-    const wordsB = b.split(/\W+/).filter(w => w.length > 2);
-    
-    if (wordsA.length === 0) return 0;
-    for (let w of wordsA) {
-        if (wordsB.includes(w)) matches++;
+    for (let w of words) {
+        if (cleanB.includes(w)) matches++;
     }
-    return matches / wordsA.length;
-}
-
-async function limitedMap(list, limit, fn) {
-    const results = [];
-    const executing = [];
-    for (const item of list) {
-        const p = Promise.resolve().then(() => fn(item));
-        results.push(p);
-        if (limit <= list.length) {
-            const e = p.then(() => executing.splice(executing.indexOf(e), 1));
-            executing.push(e);
-            if (executing.length >= limit) await Promise.race(executing);
-        }
-    }
-    return Promise.all(results);
-}
-
-// Wrapper RD con gestione Cache e Errore 429
-async function checkRealDebrid(magnet, rdKey) {
-    if (!magnet) return null;
-    const hashMatch = magnet.match(/btih:([A-F0-9]{40})/i);
-    const hash = hashMatch ? hashMatch[1].toUpperCase() : magnet;
-    
-    if (CACHE.rd_results.has(hash)) {
-        return CACHE.rd_results.get(hash);
-    }
-
-    try {
-        const data = await RD.getStreamLink(rdKey, magnet);
-        if (data && data.type === 'ready') {
-            CACHE.rd_results.set(hash, data);
-        }
-        return data;
-    } catch (e) {
-        // Rilanciamo l'errore SOLO se è un 429 (Rate Limit) per gestirlo nel loop principale
-        const isRateLimit = (e.message && e.message.includes('429')) || 
-                            (e.response && e.response.status === 429);
-        
-        if (isRateLimit) {
-            throw new Error('429_RATE_LIMIT');
-        }
-        return null;
-    }
+    return matches / words.length;
 }
 
 // ==========================================
-// 🧠 THE BRAIN: MATCHING INTELLIGENTE
+// 🧠 THE BRAIN: ITALIAN SMART MATCHING
 // ==========================================
 
 const Brain = {
-    isEpisodeMatch: (torrentTitle, season, episode, isAnime = false) => {
+    isEpisodeMatch: (torrentTitle, season, episode) => {
         if (!torrentTitle) return false;
         
         const title = torrentTitle.toLowerCase()
@@ -168,11 +100,7 @@ const Brain = {
         const e = parseInt(episode);
         const sStr = String(s).padStart(2, '0');
 
-        if (isAnime) {
-            const absoluteRegex = new RegExp(`(?:\\s|\\.|_|\\[|#)${e}(?:\\s|\\.|_|\\]|v\\d|$)`, 'i');
-            if (absoluteRegex.test(title)) return true;
-        }
-
+        // 1. CHECK MULTI-STAGIONE
         const multiSeasonRegex = /(?:s|stagion[ie]|seasons?)\s*(\d{1,2})\s*(?:a|to|thru|e|-)\s*(?:s|stagion[ie]|seasons?)?\s*(\d{1,2})/i;
         const multiMatch = title.match(multiSeasonRegex);
         if (multiMatch) {
@@ -180,30 +108,22 @@ const Brain = {
             const endS = parseInt(multiMatch[2]);
             if (s >= startS && s <= endS) return true;
         }
-        
-        const rangePack = title.match(/S(\d+)\s*-\s*S(\d+)/i);
-        if (rangePack) {
-            const start = parseInt(rangePack[1]);
-            const end = parseInt(rangePack[2]);
-            if (s >= start && s <= end) return true;
-        }
 
+        // 2. CHECK STAGIONE SPECIFICA
         const seasonPatterns = [
-            `s${sStr}`, `s${s} `, `stagione ${s}`, `stagione ${sStr}`,  
+            `s${sStr}`, `s${s} `, `stagione ${s}`, `stagione ${sStr}`, 
             `${s}\\^ stagione`, `season ${s}`, `serie completa`, `complete series`
         ];
+
         const hasSeason = seasonPatterns.some(p => title.includes(p));
         
-        if (!hasSeason && !isAnime) {
+        if (!hasSeason) {
             if (!new RegExp(`s${sStr}e`, 'i').test(title) && !new RegExp(`${s}x`, 'i').test(title)) {
                 return false;
             }
         }
 
-        if (hasSeason && (title.includes("pack") || title.includes("completa") || title.includes("complete") || title.includes("tutta"))) {
-            return true;
-        }
-
+        // 3. CHECK EPISODIO
         const epMatch = title.match(/\b(?:e|ep|episodio|x)\s*(\d{1,3})\b/i);
         if (epMatch) {
             const foundEp = parseInt(epMatch[1]);
@@ -213,9 +133,7 @@ const Brain = {
             if (rangeMatch && e >= parseInt(rangeMatch[1]) && e <= parseInt(rangeMatch[2])) return true;
             return false; 
         }
-
-        if (hasSeason) return true;
-        return false;
+        return true;
     },
 
     extractInfo: (title) => {
@@ -227,16 +145,11 @@ const Brain = {
         else if (t.includes("480p") || t.includes("sd")) quality = "SD";
         
         let lang = [];
-        if (t.includes("sub ita") || t.includes("subita") || t.includes("vose")) lang.push("SUB-ITA 🇮🇹");
-        else if (t.includes("ita") || t.includes("italian") || t.includes("itali")) lang.push("ITA 🇮🇹");
-        if (t.includes("multi") || t.includes("mux") || t.includes("mxt")) lang.push("MULTI 🌐");
-        if (lang.length === 0) lang.push("ENG/SUB 🇬🇧");
+        if (t.includes("ita")) lang.push("ITA 🇮🇹");
+        if (t.includes("multi")) lang.push("MULTI 🌐");
+        if (!t.includes("ita") && !t.includes("multi")) lang.push("ENG/SUB 🇬🇧");
         
-        let audio = "";
-        if (t.match(/ac3|dd5\.1|5\.1|dts/)) audio = "🔊 5.1";
-        else if (t.match(/aac|2\.0|stereo/)) audio = "🔊 2.0";
-
-        return { quality, lang, audio };
+        return { quality, lang };
     }
 };
 
@@ -266,17 +179,12 @@ const MetadataService = {
                 const res = await axios.get(`https://api.themoviedb.org/3/${type === 'movie' ? 'movie' : 'tv'}/${cleanId}?api_key=${tmdbKey}&language=it-IT`);
                 details = res.data;
             }
-            
             if (details) {
-                const genres = details.genres || [];
-                const isAnime = genres.some(g => g.name === 'Animation') || details.original_language === 'ja';
-
                 const meta = {
                     title: details.title || details.name,
                     originalTitle: details.original_title || details.original_name,
                     year: (details.release_date || details.first_air_date)?.split('-')[0],
                     isSeries: type === 'series',
-                    isAnime: isAnime,
                     season: seasonNum,
                     episode: episodeNum
                 };
@@ -290,54 +198,48 @@ const MetadataService = {
 
 const ProviderService = {
     search: async (metadata, filters) => {
-        let queries = new Set();
+        let queries = [];
         const searchYear = metadata.isSeries ? null : metadata.year;
-        const cleanTitle = cleanSearchQuery(metadata.title);
-        const isShortTitle = cleanTitle.length < 4; 
 
         if (metadata.isSeries) {
             const s = String(metadata.season).padStart(2, '0');
-            const e = String(metadata.episode).padStart(2, '0'); 
-
-            queries.add(`${metadata.title} ITA`);
-            queries.add(`${metadata.title} S${s}`);
-            queries.add(`${metadata.title} stagione ${metadata.season}`);
-            
-            if (metadata.isAnime) {
-                queries.add(`${metadata.title} ${metadata.episode}`);
-                queries.add(`${metadata.title} ${metadata.episode} ITA`);
-            } else {
-                queries.add(`${metadata.title} ${metadata.season}x${e} ita`);
-                queries.add(`${metadata.title} S${s}E${e}`);
-            }
-
+            queries.push(`${metadata.title} ITA`);
+            queries.push(`${metadata.title} Stagione ${metadata.season}`);
+            queries.push(`${metadata.title} S${s}`);
+            queries.push(`${metadata.title} Stagioni`);
             if (metadata.originalTitle && metadata.originalTitle !== metadata.title) {
-                queries.add(`${metadata.originalTitle} ITA`);
-                queries.add(`${metadata.originalTitle} S${s}`);
-                if (metadata.isAnime) queries.add(`${metadata.originalTitle} ${metadata.episode}`);
+                queries.push(`${metadata.originalTitle} ITA`);
+                queries.push(`${metadata.originalTitle} Stagione ${metadata.season}`);
             }
         } else {
-            if (!isShortTitle) queries.add(`${metadata.title} ITA`);
-            queries.add(`${metadata.title} ${metadata.year}`);
+            queries.push(`${metadata.title} ITA`);
+            queries.push(`${metadata.title} ${metadata.year}`);
             if (metadata.originalTitle && metadata.originalTitle !== metadata.title) {
-                queries.add(`${metadata.originalTitle} ITA`);
-                queries.add(`${metadata.originalTitle} ${metadata.year}`);
+                queries.push(`${metadata.originalTitle} ITA`);
             }
         }
 
-        const uniqueQueries = Array.from(queries);
-        console.log(`   🔍 Queries Uniche: ${JSON.stringify(uniqueQueries)}`);
+        queries = [...new Set(queries)];
+        console.log(`   🔍 Queries: ${JSON.stringify(queries)}`);
 
-        let tasks = [];
-        uniqueQueries.forEach(q => {
-            tasks.push(() => Corsaro.searchMagnet(q, searchYear).catch(() => []));
-            tasks.push(() => UIndex.searchMagnet(q, searchYear).catch(() => []));
-            tasks.push(() => Knaben.searchMagnet(q, searchYear).catch(() => []));
-            tasks.push(() => TorrentMagnet.searchMagnet(q, searchYear).catch(() => []));
-            tasks.push(() => Apibay.searchMagnet(q, searchYear).catch(() => []));
+        let promises = [];
+        queries.forEach(q => {
+            promises.push(Corsaro.searchMagnet(q, searchYear).catch(() => []));
+            promises.push(UIndex.searchMagnet(q, searchYear).catch(() => []));
         });
 
-        const resultsArray = await limitedMap(tasks, 4, (task) => task());
+        if (!filters.onlyIta) {
+            const cleanTitle = cleanSearchQuery(metadata.title);
+            let globalQuery = metadata.isSeries ? `${cleanTitle} S${String(metadata.season).padStart(2,'0')}` : `${cleanTitle} ${metadata.year}`;
+            promises.push(Knaben.searchMagnet(globalQuery, searchYear).catch(() => []));
+            promises.push(Apibay.searchMagnet(globalQuery, searchYear).catch(() => []));
+            promises.push(TorrentMagnet.searchMagnet(globalQuery, searchYear).catch(() => []));
+        } else {
+            const itaQuery = `${cleanSearchQuery(metadata.title)} ITA`;
+            promises.push(Knaben.searchMagnet(itaQuery, searchYear).catch(() => []));
+        }
+
+        const resultsArray = await Promise.all(promises);
         return resultsArray.flat();
     }
 };
@@ -347,111 +249,98 @@ const StreamService = {
         const filters = config.filters || {};
         const REAL_SIZE_FILTER = metadata.isSeries ? 50 * 1024 * 1024 : 200 * 1024 * 1024;
 
+        // Deduplica
         const uniqueMap = new Map();
         for (const item of results) {
             const hashMatch = item.magnet.match(/btih:([A-F0-9]{40})/i);
             const hash = hashMatch ? hashMatch[1].toUpperCase() : null;
-            
-            if (hash && BLACKLIST_HASH.has(hash)) continue;
-            if (similar(metadata.title, item.title) < 0.35) continue;
-
-            if (filters.onlyIta) {
-                if (!/ita|sub ita|italian|ita mux|vose/i.test(item.title)) continue;
-            }
-
-            if (hash && !uniqueMap.has(hash)) {
-                item.magnet = enrichMagnet(item.magnet);
-                uniqueMap.set(hash, item);
-            }
+            if (hash && !uniqueMap.has(hash)) uniqueMap.set(hash, item);
         }
-        
         let uniqueResults = Array.from(uniqueMap.values());
 
+        // 1. BRAIN FILTER
         if (metadata.isSeries) {
             uniqueResults = uniqueResults.filter(item => 
-                Brain.isEpisodeMatch(item.title, metadata.season, metadata.episode, metadata.isAnime)
+                Brain.isEpisodeMatch(item.title, metadata.season, metadata.episode)
             );
         }
 
+        // 2. FILTRI UTENTE
         if (filters.no4k) uniqueResults = uniqueResults.filter(i => !/2160p|4k|uhd/i.test(i.title));
         if (filters.noCam) uniqueResults = uniqueResults.filter(i => !/cam|dvdscr|telesync/i.test(i.title));
 
+        // 3. SIMILARITY FILTER
+        uniqueResults = uniqueResults.filter(item => {
+            const scoreIta = similar(metadata.title, item.title);
+            const scoreEng = metadata.originalTitle ? similar(metadata.originalTitle, item.title) : 0;
+            if (scoreIta < 0.33 && scoreEng < 0.33) return false;
+            return true;
+        });
+
+        // 4. ORDINAMENTO
         uniqueResults.sort((a, b) => {
             const infoA = Brain.extractInfo(a.title);
             const infoB = Brain.extractInfo(b.title);
             const itaA = infoA.lang.some(l => l.includes("ITA")) ? 1 : 0;
             const itaB = infoB.lang.some(l => l.includes("ITA")) ? 1 : 0;
             if (itaA !== itaB) return itaB - itaA; 
-            return (b.sizeBytes || 0) - (a.sizeBytes || 0);
+            return (b.sizeBytes || 0) - (a.sizeBytes || 0); 
         });
         
-        const candidates = uniqueResults.slice(0, 30); 
+        // --- 🛡️ LIMITAZIONE CANDIDATI (V32) ---
+        // Ridotto a 12 per sicurezza massima
+        const candidates = uniqueResults.slice(0, 12); 
         let streams = [];
 
-        console.log(`   ⚡ RD Checking ${candidates.length} candidates...`);
-
-        // --- SMART ABORT STRATEGY ---
-        let stopScanning = false;
+        console.log(`   ⚡ Processing ${candidates.length} candidates (Safe Mode)...`);
 
         for (const item of candidates) {
-            // Se abbiamo attivato il flag di stop, usciamo subito dal loop
-            if (stopScanning) break;
-
-            let streamData = null;
+            // --- 🛡️ WAIT PREVENTIVO (V32) ---
+            // Aspettiamo PRIMA di fare qualsiasi cosa.
+            // Questo assicura che anche in caso di continue/error, il tempo passa.
+            await wait(600); 
 
             try {
-                streamData = await checkRealDebrid(item.magnet, config.rd);
-            } catch (e) {
-                if (e.message === '429_RATE_LIMIT') {
-                    console.warn("🛑 RD RATE LIMIT HIT. Stop scansione per salvare API.");
-                    console.warn("   Restituisco i risultati trovati finora.");
-                    // Attiviamo lo stop: non proviamo più nessun altro link in questa richiesta.
-                    stopScanning = true; 
-                    // Non serve break qui, il check all'inizio del loop bloccherà il prossimo
+                // Chiamata RD con protezione
+                let streamData = null;
+                try {
+                    streamData = await RD.getStreamLink(config.rd, item.magnet);
+                } catch (rdError) {
+                    console.log("   ⚠️ RD Error. Waiting extra 2s...");
+                    await wait(2000); // Backoff in caso di errore
+                    continue; // Salta al prossimo (dopo il wait iniziale del prossimo giro)
                 }
+
+                // ========================================================
+                // 🛑 STRICT MODE: Se non c'è link o non è READY, CANCELLA.
+                // ========================================================
+                if (!streamData) continue; 
+                if (streamData.type !== 'ready' && !streamData.url) continue;
+
+                // Filtro dimensione reale
+                if (streamData.size < REAL_SIZE_FILTER) continue;
+
+                const fileTitle = streamData?.filename || item.title;
+                const finalInfo = Brain.extractInfo(fileTitle); 
+
+                let displayLang = finalInfo.lang.join(" / ");
+                if (!displayLang) {
+                    if (item.source === "Corsaro") displayLang = "ITA 🇮🇹"; 
+                    else if (item.source === "UIndex" && item.title.includes("ITA")) displayLang = "ITA 🇮🇹";
+                    else displayLang = "ENG/MULTI ❓";
+                }
+
+                streams.push({
+                    name: `[RD ⚡] ${item.source}\n${finalInfo.quality}`,
+                    title: `${fileTitle}\n💾 ${formatBytes(streamData.size)}\n🔊 ${displayLang}`,
+                    url: streamData.url,
+                    behaviorHints: { notWebReady: false }
+                });
+
+            } catch (e) {
+                // Ignora errori minori
             }
-
-            // PAUSA STANDARD (500ms): Bilanciata
-            await wait(500); 
-
-            if (!streamData) continue;
-            if (streamData.type !== 'ready') continue;
-            if (streamData.size < REAL_SIZE_FILTER) continue;
-
-            const fileTitle = streamData.filename || item.title;
-            const finalInfo = Brain.extractInfo(fileTitle); 
-
-            let displayLang = finalInfo.lang.join(" / ");
-            if (!displayLang) {
-                if (item.source.includes("Corsaro")) displayLang = "ITA 🇮🇹";
-                else if (item.source.includes("UIndex") && item.title.includes("ITA")) displayLang = "ITA 🇮🇹";
-                else displayLang = "ENG/MULTI ❓";
-            }
-
-            let nameTag = `[RD ⚡] ${item.source}\n${finalInfo.quality}`;
-            let titleStr = `${fileTitle}\n`;
-            titleStr += `💾 ${formatBytes(streamData.size)} `;
-            if (finalInfo.audio) titleStr += `${finalInfo.audio}\n`;
-            else titleStr += "\n";
-            titleStr += `🔊 ${displayLang}`;
-
-            streams.push({
-                name: nameTag,
-                title: titleStr,
-                url: streamData.url,
-                behaviorHints: { notWebReady: false }
-            });
         }
-
-        if (stopScanning && streams.length === 0) {
-            // Se ci siamo fermati subito e non abbiamo nulla, aggiungiamo un avviso
-            streams.push({
-                name: "[⚠️ RD LIMIT]",
-                title: "Rate Limit raggiunto.\nRiprova tra poco.",
-                url: "#"
-            });
-        }
-
         return streams;
     }
 };
@@ -501,7 +390,7 @@ app.get('/:userConf/stream/:type/:id.json', async (req, res) => {
         }
 
         const streams = await StreamService.processResults(rawResults, metadata, config);
-        const response = streams.length > 0 ? { streams } : { streams: [{ title: "🚫 Nessun file CACHED trovato" }] };
+        const response = streams.length > 0 ? { streams } : { streams: [{ title: "🚫 Nessun file in cache trovato" }] };
 
         CACHE.streams.set(cacheKey, response);
         res.setHeader('Access-Control-Allow-Origin', '*');
@@ -513,5 +402,5 @@ app.get('/:userConf/stream/:type/:id.json', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`🚀 BRAIN V31.5 (SMART ABORT) - Port ${PORT}`);
+    console.log(`🚀 THE BRAIN V32 - SAFE MODE - Port ${PORT}`);
 });
