@@ -7,7 +7,7 @@ const NodeCache = require("node-cache");
 // --- MODULI PROVIDER ---
 const RD = require("./rd");
 const Corsaro = require("./corsaro");
-const Apibay = require("./apibay");
+const Apibay = require("./1337x");
 const UIndex = require("./uindex"); 
 const Knaben = require("./knaben"); 
 
