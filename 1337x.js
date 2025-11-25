@@ -34,8 +34,8 @@ async function search1337x(title) {
         const $ = cheerio.load(data);
         let candidates = [];
 
-        // Preleva i primi 4 risultati dalla tabella
-        $('table.table-list tr').slice(0, 4).each((_, row) => {
+        // MODIFICA QUI: Preleva i primi 5 risultati (era 4)
+        $('table.table-list tr').slice(0, 5).each((_, row) => {
             const name = $(row).find('.name a').eq(1).text();
             const link = $(row).find('.name a').eq(1).attr('href');
             const seeds = parseInt($(row).find('.seeds').text()) || 0;
@@ -47,6 +47,7 @@ async function search1337x(title) {
         });
 
         // Risolve i magnet link entrando nelle pagine specifiche (in parallelo)
+        // Nota: Questo eseguirà fino a 5 richieste in parallelo.
         const magnets = await Promise.all(candidates.map(async c => {
             try {
                 const res = await axios.get(`${BASE_1337X}${c.link}`, { timeout: 2000 });
@@ -59,7 +60,7 @@ async function search1337x(title) {
                         magnet, 
                         seeders: c.seeds, 
                         source: '1337x', 
-                        sizeBytes: 0 // 1337x nella view lista non dà i byte precisi facilmente, lasciamo 0 o parsiamo se serve
+                        sizeBytes: 0 
                     };
                 }
             } catch (e) { return null; }
@@ -88,7 +89,7 @@ async function searchMagnet(title, year) {
         if (res.status === 'fulfilled') all.push(...res.value);
     });
 
-    // Deduplica (utile se in futuro riaggiungi altre fonti)
+    // Deduplica 
     const seen = new Set();
     const unique = all.filter(item => {
         const hash = extractInfoHash(item.magnet);
@@ -97,7 +98,8 @@ async function searchMagnet(title, year) {
         return true;
     });
 
-    return unique.sort((a, b) => b.seeders - a.seeders).slice(0, 20);
+    // MODIFICA QUI: Restituisce massimo 5 risultati finali (era 20)
+    return unique.sort((a, b) => b.seeders - a.seeders).slice(0, 5);
 }
 
 module.exports = { searchMagnet };
