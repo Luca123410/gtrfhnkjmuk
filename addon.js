@@ -19,21 +19,33 @@ const CACHE = {
     metadata: new NodeCache({ stdTTL: 86400, checkperiod: 3600 }) // 24 ore
 };
 
+// LISTA TRACKERS DI FALLBACK (Migliora resilienza download su RD)
+const BEST_TRACKERS = [
+    "udp://tracker.opentrackr.org:1337/announce",
+    "udp://9.rarbg.to:2920/announce",
+    "udp://tracker.coppersurfer.tk:6969/announce",
+    "udp://tracker.leechers-paradise.org:6969/announce",
+    "udp://tracker.internetwarriors.net:1337/announce"
+];
+
 const app = express();
 const PORT = process.env.PORT || 7000;
 
 app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// --- MANIFEST (V30 TOTAL WAR + MAGIC QUERIES) ---
+// --- MANIFEST (V31.1 STABLE) ---
 const MANIFEST = {
-    id: "org.community.corsaro-brain-v30",
-    version: "30.1.0", 
-    name: "Corsaro + Global (V30 MAGIC)",
-    description: "🇮🇹 V30.1: Total War + Query Magiche. Cerca pack completi, WebDL e formati scena (1x01) per massimizzare i risultati serie TV.",
+    id: "org.community.corsaro-brain-v31-stable",
+    version: "31.1.0", 
+    name: "Corsaro + Global (V31 STABLE)",
+    description: "🇮🇹 V31.1: Anime Support + Anti-429 Protection. Ottimizzato per Real-Debrid.",
     resources: ["catalog", "stream"],
-    types: ["movie", "series"],
-    catalogs: [{ type: "movie", id: "tmdb_trending", name: "Popolari Italia" }],
+    types: ["movie", "series", "anime"],
+    catalogs: [
+        { type: "movie", id: "tmdb_trending", name: "Popolari Italia" },
+        { type: "series", id: "tmdb_trending_series", name: "Serie TV Popolari" }
+    ],
     idPrefixes: ["tmdb", "tt"],
     behaviorHints: { configurable: true, configurationRequired: true }
 };
@@ -64,12 +76,18 @@ function cleanSearchQuery(query) {
         .trim();
 }
 
+function enrichMagnet(magnet) {
+    if (!magnet.startsWith("magnet:?")) return magnet;
+    const trParams = BEST_TRACKERS.map(t => `&tr=${encodeURIComponent(t)}`).join("");
+    return magnet + trParams;
+}
+
 // ==========================================
-// 🧠 THE BRAIN: MATCHING INTELLIGENTE
+// 🧠 THE BRAIN: MATCHING INTELLIGENTE V2
 // ==========================================
 
 const Brain = {
-    isEpisodeMatch: (torrentTitle, season, episode) => {
+    isEpisodeMatch: (torrentTitle, season, episode, isAnime = false) => {
         if (!torrentTitle) return false;
         
         const title = torrentTitle.toLowerCase()
@@ -86,7 +104,13 @@ const Brain = {
         const e = parseInt(episode);
         const sStr = String(s).padStart(2, '0');
 
-        // 1. CHECK MULTI-STAGIONE
+        // 1. ANIME / ABSOLUTE NUMBERING
+        if (isAnime) {
+            const absoluteRegex = new RegExp(`(?:\\s|\\.|_|\\[|#)${e}(?:\\s|\\.|_|\\]|v\\d|$)`, 'i');
+            if (absoluteRegex.test(title)) return true;
+        }
+
+        // 2. CHECK MULTI-STAGIONE (Range S01-S03)
         const multiSeasonRegex = /(?:s|stagion[ie]|seasons?)\s*(\d{1,2})\s*(?:a|to|thru|e|-)\s*(?:s|stagion[ie]|seasons?)?\s*(\d{1,2})/i;
         const multiMatch = title.match(multiSeasonRegex);
         if (multiMatch) {
@@ -94,22 +118,23 @@ const Brain = {
             const endS = parseInt(multiMatch[2]);
             if (s >= startS && s <= endS) return true;
         }
+        
+        const rangePack = title.match(/S(\d+)\s*-\s*S(\d+)/i);
+        if (rangePack) {
+            const start = parseInt(rangePack[1]);
+            const end = parseInt(rangePack[2]);
+            if (s >= start && s <= end) return true;
+        }
 
-        // 2. CHECK STAGIONE SPECIFICA
+        // 3. CHECK STAGIONE SPECIFICA
         const seasonPatterns = [
-            `s${sStr}`,          
-            `s${s} `,            
-            `stagione ${s}`,     
-            `stagione ${sStr}`,  
-            `${s}\\^ stagione`,  
-            `season ${s}`,       
-            `serie completa`,    
-            `complete series`
+            `s${sStr}`, `s${s} `, `stagione ${s}`, `stagione ${sStr}`,  
+            `${s}\\^ stagione`, `season ${s}`, `serie completa`, `complete series`
         ];
 
         const hasSeason = seasonPatterns.some(p => title.includes(p));
         
-        if (!hasSeason) {
+        if (!hasSeason && !isAnime) {
             if (!new RegExp(`s${sStr}e`, 'i').test(title) && !new RegExp(`${s}x`, 'i').test(title)) {
                 return false;
             }
@@ -120,21 +145,19 @@ const Brain = {
             return true;
         }
 
-        // 3. CHECK EPISODIO
+        // 4. CHECK EPISODIO
         const epMatch = title.match(/\b(?:e|ep|episodio|x)\s*(\d{1,3})\b/i);
-        
         if (epMatch) {
             const foundEp = parseInt(epMatch[1]);
             if (foundEp === e) return true; 
-            
             const rangeRegex = /(?:e|x)(\d{1,3})\s*(?:-|al?)\s*(?:e|x)?(\d{1,3})/i;
             const rangeMatch = title.match(rangeRegex);
             if (rangeMatch && e >= parseInt(rangeMatch[1]) && e <= parseInt(rangeMatch[2])) return true;
-
             return false; 
         }
 
-        return true;
+        if (hasSeason) return true;
+        return false;
     },
 
     extractInfo: (title) => {
@@ -146,18 +169,17 @@ const Brain = {
         else if (t.includes("480p") || t.includes("sd")) quality = "SD";
         
         let lang = [];
-
-        if (t.includes("sub ita") || t.includes("subita") || t.includes("vose")) {
-            lang.push("SUB-ITA 🇮🇹");
-        } else if (t.includes("ita") || t.includes("italian") || t.includes("itali")) {
-            lang.push("ITA 🇮🇹");
-        }
-
+        if (t.includes("sub ita") || t.includes("subita") || t.includes("vose")) lang.push("SUB-ITA 🇮🇹");
+        else if (t.includes("ita") || t.includes("italian") || t.includes("itali")) lang.push("ITA 🇮🇹");
         if (t.includes("multi") || t.includes("mux") || t.includes("mxt")) lang.push("MULTI 🌐");
-        
         if (lang.length === 0) lang.push("ENG/SUB 🇬🇧");
         
-        return { quality, lang };
+        // AUDIO DETECTION
+        let audio = "";
+        if (t.match(/ac3|dd5\.1|5\.1|dts/)) audio = "🔊 5.1";
+        else if (t.match(/aac|2\.0|stereo/)) audio = "🔊 2.0";
+
+        return { quality, lang, audio };
     }
 };
 
@@ -187,12 +209,17 @@ const MetadataService = {
                 const res = await axios.get(`https://api.themoviedb.org/3/${type === 'movie' ? 'movie' : 'tv'}/${cleanId}?api_key=${tmdbKey}&language=it-IT`);
                 details = res.data;
             }
+            
             if (details) {
+                const genres = details.genres || [];
+                const isAnime = genres.some(g => g.name === 'Animation') || details.original_language === 'ja';
+
                 const meta = {
                     title: details.title || details.name,
                     originalTitle: details.original_title || details.original_name,
                     year: (details.release_date || details.first_air_date)?.split('-')[0],
                     isSeries: type === 'series',
+                    isAnime: isAnime,
                     season: seasonNum,
                     episode: episodeNum
                 };
@@ -209,39 +236,35 @@ const ProviderService = {
         let queries = [];
         const searchYear = metadata.isSeries ? null : metadata.year;
         
-        // FIX PER TITOLI CORTI 
-        // Se il titolo è < 4 caratteri, è obbligatorio usare l'anno altrimenti i tracker lo ignorano.
         const cleanTitle = cleanSearchQuery(metadata.title);
         const isShortTitle = cleanTitle.length < 4; 
 
-        // --- COSTRUZIONE QUERY ---
         if (metadata.isSeries) {
             const s = String(metadata.season).padStart(2, '0');
             const e = String(metadata.episode).padStart(2, '0'); 
 
-            // 1. Query Standard
             queries.push(`${metadata.title} ITA`);
             queries.push(`${metadata.title} Stagione ${metadata.season}`);
             queries.push(`${metadata.title} S${s}`);
-            queries.push(`${metadata.title} Stagioni`);
-            
-            // 2. ✨ QUERY MAGICHE (PACKS & WEB-DL) ✨
             queries.push(`${metadata.title} stagione ${metadata.season} pack ita`);
             queries.push(`${metadata.title} S${s} completa ita`);
-            queries.push(`${metadata.title} ${metadata.season}x${e} ita`); // Es: 1x05 ita
-            queries.push(`${metadata.title} stagione ${metadata.season} torrent ita webdl`);
+            
+            if (metadata.isAnime) {
+                queries.push(`${metadata.title} ${metadata.episode}`);
+                queries.push(`${metadata.title} ${metadata.episode} ITA`);
+            } else {
+                queries.push(`${metadata.title} ${metadata.season}x${e} ita`);
+            }
 
-            // 3. Original Title
             if (metadata.originalTitle && metadata.originalTitle !== metadata.title) {
                 queries.push(`${metadata.originalTitle} ITA`);
                 queries.push(`${metadata.originalTitle} S${s}`);
+                if (metadata.isAnime) queries.push(`${metadata.originalTitle} ${metadata.episode}`);
             }
         } else {
-            // MOVIE
-            if (!isShortTitle) queries.push(`${metadata.title} ITA`); // Solo se titolo lungo
-            queries.push(`${metadata.title} ${metadata.year}`); // Fondamentale per xXx
+            if (!isShortTitle) queries.push(`${metadata.title} ITA`);
+            queries.push(`${metadata.title} ${metadata.year}`);
             queries.push(`${metadata.title} ITA ${metadata.year}`); 
-            
             if (metadata.originalTitle && metadata.originalTitle !== metadata.title) {
                 queries.push(`${metadata.originalTitle} ITA`);
                 queries.push(`${metadata.originalTitle} ${metadata.year}`);
@@ -249,37 +272,28 @@ const ProviderService = {
         }
 
         queries = [...new Set(queries)];
-        console.log(`   🔍 Queries V30 (+Magic): ${JSON.stringify(queries)}`);
+        console.log(`   🔍 Queries: ${JSON.stringify(queries)}`);
 
-        // ============================================
-        // V30: TOTAL WAR (PARALLEL EXECUTION)
-        // ============================================
         let promises = [];
 
-        // 1. PROVIDER ITA
         queries.forEach(q => {
             promises.push(Corsaro.searchMagnet(q, searchYear).catch(() => []));
             promises.push(UIndex.searchMagnet(q, searchYear).catch(() => []));
         });
 
-        // 2. PROVIDER GLOBAL (Se non filtrati)
         if (!filters.onlyIta) {
-            const cleanTitle = cleanSearchQuery(metadata.title);
             let globalQuery = metadata.isSeries 
                 ? `${cleanTitle} S${String(metadata.season).padStart(2,'0')}` 
                 : `${cleanTitle} ${metadata.year}`; 
             
+            if (metadata.isAnime) globalQuery = `${cleanTitle} ${metadata.episode}`;
             const itaQuery = `${cleanSearchQuery(metadata.title)} ITA`;
 
-            // KNABEN
             promises.push(Knaben.searchMagnet(globalQuery, searchYear).catch(() => []));
             promises.push(Knaben.searchMagnet(itaQuery, searchYear).catch(() => []));
-
-            // APIBAY & TORRENTMAGNET
             promises.push(Apibay.searchMagnet(globalQuery, searchYear).catch(() => []));
             promises.push(TorrentMagnet.searchMagnet(globalQuery, searchYear).catch(() => []));
         } else {
-            // Se "onlyIta", proviamo Knaben in mode ITA come backup
              const itaQuery = `${cleanSearchQuery(metadata.title)} ITA`;
              promises.push(Knaben.searchMagnet(itaQuery, searchYear).catch(() => []));
         }
@@ -294,48 +308,51 @@ const StreamService = {
         const filters = config.filters || {};
         const REAL_SIZE_FILTER = metadata.isSeries ? 50 * 1024 * 1024 : 200 * 1024 * 1024;
 
-        // UNICITÀ (Mantiene il primo trovato)
         const uniqueMap = new Map();
         for (const item of results) {
             const hashMatch = item.magnet.match(/btih:([A-F0-9]{40})/i);
             const hash = hashMatch ? hashMatch[1].toUpperCase() : null;
             if (hash && !uniqueMap.has(hash)) {
+                item.magnet = enrichMagnet(item.magnet);
                 uniqueMap.set(hash, item);
             }
         }
         let uniqueResults = Array.from(uniqueMap.values());
 
-        // FILTRO EPISODIO
         if (metadata.isSeries) {
             uniqueResults = uniqueResults.filter(item => 
-                Brain.isEpisodeMatch(item.title, metadata.season, metadata.episode)
+                Brain.isEpisodeMatch(item.title, metadata.season, metadata.episode, metadata.isAnime)
             );
         }
 
         if (filters.no4k) uniqueResults = uniqueResults.filter(i => !/2160p|4k|uhd/i.test(i.title));
         if (filters.noCam) uniqueResults = uniqueResults.filter(i => !/cam|dvdscr|telesync/i.test(i.title));
 
-        // ORDINAMENTO V30
-        // 1. ITA
-        // 2. Seeders (se disponibili, ma spesso non affidabili) -> Size
         uniqueResults.sort((a, b) => {
             const infoA = Brain.extractInfo(a.title);
             const infoB = Brain.extractInfo(b.title);
             const itaA = infoA.lang.some(l => l.includes("ITA")) ? 1 : 0;
             const itaB = infoB.lang.some(l => l.includes("ITA")) ? 1 : 0;
-            
-            if (itaA !== itaB) return itaB - itaA; // Prima ITA
-            return (b.sizeBytes || 0) - (a.sizeBytes || 0); // Poi Grandezza
+            if (itaA !== itaB) return itaB - itaA; 
+            return (b.sizeBytes || 0) - (a.sizeBytes || 0);
         });
         
-        const candidates = uniqueResults.slice(0, 60); // Aumentato limite a 60
+        // 🛡️ SICUREZZA ANTI-429: Processa max 30 risultati
+        const candidates = uniqueResults.slice(0, 30); 
         let streams = [];
+
+        console.log(`   ⚡ RD Checking ${candidates.length} candidates...`);
 
         for (const item of candidates) {
             try {
+                // 1. Richiesta a RD
                 const streamData = await RD.getStreamLink(config.rd, item.magnet);
+                
+                // 2. PAUSA TATTICA (Anti-429)
+                await wait(250); 
+
                 if (!streamData) continue;
-                if (streamData.type !== 'ready') continue; // Solo Cached
+                if (streamData.type !== 'ready') continue;
                 if (streamData.size < REAL_SIZE_FILTER) continue;
 
                 const fileTitle = streamData.filename || item.title;
@@ -349,9 +366,10 @@ const StreamService = {
                 }
 
                 let nameTag = `[RD ⚡] ${item.source}\n${finalInfo.quality}`;
-
                 let titleStr = `${fileTitle}\n`;
-                titleStr += `💾 ${formatBytes(streamData.size)}\n`;
+                titleStr += `💾 ${formatBytes(streamData.size)} `;
+                if (finalInfo.audio) titleStr += `${finalInfo.audio}\n`;
+                else titleStr += "\n";
                 titleStr += `🔊 ${displayLang}`;
 
                 streams.push({
@@ -361,8 +379,13 @@ const StreamService = {
                     behaviorHints: { notWebReady: false }
                 });
                 
-                await wait(20); 
-            } catch (e) {}
+            } catch (e) {
+                // 3. GESTIONE RATE LIMIT
+                if (e.message && e.message.includes('429')) {
+                    console.log("⚠️ RD RATE LIMIT! Raffreddamento 2 secondi...");
+                    await wait(2000); 
+                }
+            }
         }
         return streams;
     }
@@ -425,5 +448,5 @@ app.get('/:userConf/stream/:type/:id.json', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`🚀 THE BRAIN V30 - FULL SEARCH (MAGIC) - Port ${PORT}`);
+    console.log(`🚀 BRAIN V31.1 (ANTI-429) - Port ${PORT}`);
 });
