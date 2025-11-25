@@ -8,9 +8,8 @@ const NodeCache = require("node-cache");
 const RD = require("./rd");
 const Corsaro = require("./corsaro");
 const Apibay = require("./apibay");
-const TorrentMagnet = require("./torrentmagnet");
 const UIndex = require("./uindex"); 
-const Knaben = require("./knaben");
+const Knaben = require("./knaben"); 
 
 // --- CONFIGURAZIONE CACHE ---
 const CACHE = {
@@ -27,10 +26,10 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 // --- MANIFEST ---
 const MANIFEST = {
-    id: "org.community.corsaro-brain-v32",
-    version: "32.0.0", 
-    name: "Corsaro + Global (V32 SAFE)",
-    description: "🇮🇹 V32: Fix critico Loop 429. Ritardo preventivo obbligatorio. Solo Cache Strict.",
+    id: "org.community.corsaro-brain-v37",
+    version: "37.0.0", 
+    name: "Corsaro + Global (V37 Knaben)",
+    description: "🇮🇹 V37: Motore Knaben (stile Corsaro Viola). Hybrid Search V23. Safe Mode.",
     resources: ["catalog", "stream"],
     types: ["movie", "series"],
     catalogs: [{ type: "movie", id: "tmdb_trending", name: "Popolari Italia" }],
@@ -64,22 +63,8 @@ function cleanSearchQuery(query) {
         .trim();
 }
 
-// [V30] Calcolo Similarità Stringhe
-function similar(a, b) {
-    if (!a || !b) return 0;
-    const cleanA = a.toLowerCase().replace(/[^a-z0-9 ]/g, " ").trim();
-    const cleanB = b.toLowerCase();
-    const words = cleanA.split(" ").filter(w => w.length > 1);
-    if (words.length === 0) return 0;
-    let matches = 0;
-    for (let w of words) {
-        if (cleanB.includes(w)) matches++;
-    }
-    return matches / words.length;
-}
-
 // ==========================================
-// 🧠 THE BRAIN: ITALIAN SMART MATCHING
+// 🧠 THE BRAIN: MATCHING & EXTRACTION
 // ==========================================
 
 const Brain = {
@@ -100,7 +85,7 @@ const Brain = {
         const e = parseInt(episode);
         const sStr = String(s).padStart(2, '0');
 
-        // 1. CHECK MULTI-STAGIONE
+        // 1. Multi-Stagione
         const multiSeasonRegex = /(?:s|stagion[ie]|seasons?)\s*(\d{1,2})\s*(?:a|to|thru|e|-)\s*(?:s|stagion[ie]|seasons?)?\s*(\d{1,2})/i;
         const multiMatch = title.match(multiSeasonRegex);
         if (multiMatch) {
@@ -109,25 +94,26 @@ const Brain = {
             if (s >= startS && s <= endS) return true;
         }
 
-        // 2. CHECK STAGIONE SPECIFICA
+        // 2. Stagione Specifica / Completa
         const seasonPatterns = [
             `s${sStr}`, `s${s} `, `stagione ${s}`, `stagione ${sStr}`, 
             `${s}\\^ stagione`, `season ${s}`, `serie completa`, `complete series`
         ];
-
         const hasSeason = seasonPatterns.some(p => title.includes(p));
         
         if (!hasSeason) {
+            // Se non c'è la stagione scritta esplicitamente, scarta (per sicurezza sui pack)
             if (!new RegExp(`s${sStr}e`, 'i').test(title) && !new RegExp(`${s}x`, 'i').test(title)) {
                 return false;
             }
         }
 
-        // 3. CHECK EPISODIO
+        // 3. Episodio
         const epMatch = title.match(/\b(?:e|ep|episodio|x)\s*(\d{1,3})\b/i);
         if (epMatch) {
             const foundEp = parseInt(epMatch[1]);
             if (foundEp === e) return true; 
+            // Range episodi (es. E01-E10)
             const rangeRegex = /(?:e|x)(\d{1,3})\s*(?:-|al?)\s*(?:e|x)?(\d{1,3})/i;
             const rangeMatch = title.match(rangeRegex);
             if (rangeMatch && e >= parseInt(rangeMatch[1]) && e <= parseInt(rangeMatch[2])) return true;
@@ -198,44 +184,46 @@ const MetadataService = {
 
 const ProviderService = {
     search: async (metadata, filters) => {
+        // --- V23 HYBRID STRATEGY (ITA + ENG) ---
         let queries = [];
-        const searchYear = metadata.isSeries ? null : metadata.year;
-
+        
         if (metadata.isSeries) {
             const s = String(metadata.season).padStart(2, '0');
-            queries.push(`${metadata.title} ITA`);
-            queries.push(`${metadata.title} Stagione ${metadata.season}`);
-            queries.push(`${metadata.title} S${s}`);
-            queries.push(`${metadata.title} Stagioni`);
+            queries.push(`${metadata.title} S${s}`); // Standard S01
+            queries.push(`${metadata.title} Stagione ${metadata.season}`); // Italiano
+            
             if (metadata.originalTitle && metadata.originalTitle !== metadata.title) {
-                queries.push(`${metadata.originalTitle} ITA`);
-                queries.push(`${metadata.originalTitle} Stagione ${metadata.season}`);
+                queries.push(`${metadata.originalTitle} S${s}`); // Originale S01
+                queries.push(`${metadata.originalTitle} Season ${metadata.season}`); // Inglese
             }
         } else {
-            queries.push(`${metadata.title} ITA`);
             queries.push(`${metadata.title} ${metadata.year}`);
             if (metadata.originalTitle && metadata.originalTitle !== metadata.title) {
-                queries.push(`${metadata.originalTitle} ITA`);
+                queries.push(`${metadata.originalTitle} ${metadata.year}`);
             }
         }
 
-        queries = [...new Set(queries)];
-        console.log(`   🔍 Queries: ${JSON.stringify(queries)}`);
+        queries = [...new Set(queries)].map(q => cleanSearchQuery(q));
+        console.log(`   🔍 Strategies (V37 Knaben): ${JSON.stringify(queries)}`);
 
         let promises = [];
+        const searchYear = metadata.isSeries ? null : metadata.year;
+
         queries.forEach(q => {
+            // 1. Italian Providers
             promises.push(Corsaro.searchMagnet(q, searchYear).catch(() => []));
             promises.push(UIndex.searchMagnet(q, searchYear).catch(() => []));
+            
+            // 2. Global Providers (Knaben è il re qui, come in Corsaro Viola)
+            if (!filters.onlyIta) {
+                promises.push(Knaben.searchMagnet(q, searchYear).catch(() => [])); 
+                promises.push(Apibay.searchMagnet(q, searchYear).catch(() => []));
+            }
         });
-
-        if (!filters.onlyIta) {
-            const cleanTitle = cleanSearchQuery(metadata.title);
-            let globalQuery = metadata.isSeries ? `${cleanTitle} S${String(metadata.season).padStart(2,'0')}` : `${cleanTitle} ${metadata.year}`;
-            promises.push(Knaben.searchMagnet(globalQuery, searchYear).catch(() => []));
-            promises.push(Apibay.searchMagnet(globalQuery, searchYear).catch(() => []));
-            promises.push(TorrentMagnet.searchMagnet(globalQuery, searchYear).catch(() => []));
-        } else {
-            const itaQuery = `${cleanSearchQuery(metadata.title)} ITA`;
+        
+        // Se vuole SOLO ITA, forziamo comunque una ricerca su Knaben con "ITA"
+        if (filters.onlyIta) {
+            const itaQuery = `${metadata.title} ITA`;
             promises.push(Knaben.searchMagnet(itaQuery, searchYear).catch(() => []));
         }
 
@@ -258,7 +246,7 @@ const StreamService = {
         }
         let uniqueResults = Array.from(uniqueMap.values());
 
-        // 1. BRAIN FILTER
+        // 1. BRAIN FILTER (Episode Matching)
         if (metadata.isSeries) {
             uniqueResults = uniqueResults.filter(item => 
                 Brain.isEpisodeMatch(item.title, metadata.season, metadata.episode)
@@ -269,55 +257,43 @@ const StreamService = {
         if (filters.no4k) uniqueResults = uniqueResults.filter(i => !/2160p|4k|uhd/i.test(i.title));
         if (filters.noCam) uniqueResults = uniqueResults.filter(i => !/cam|dvdscr|telesync/i.test(i.title));
 
-        // 3. SIMILARITY FILTER
-        uniqueResults = uniqueResults.filter(item => {
-            const scoreIta = similar(metadata.title, item.title);
-            const scoreEng = metadata.originalTitle ? similar(metadata.originalTitle, item.title) : 0;
-            if (scoreIta < 0.33 && scoreEng < 0.33) return false;
-            return true;
-        });
-
-        // 4. ORDINAMENTO
+        // 3. SORTING
         uniqueResults.sort((a, b) => {
-            const infoA = Brain.extractInfo(a.title);
-            const infoB = Brain.extractInfo(b.title);
-            const itaA = infoA.lang.some(l => l.includes("ITA")) ? 1 : 0;
-            const itaB = infoB.lang.some(l => l.includes("ITA")) ? 1 : 0;
+            const itaA = (Brain.extractInfo(a.title).lang.some(l => l.includes("ITA"))) ? 1 : 0;
+            const itaB = (Brain.extractInfo(b.title).lang.some(l => l.includes("ITA"))) ? 1 : 0;
             if (itaA !== itaB) return itaB - itaA; 
             return (b.sizeBytes || 0) - (a.sizeBytes || 0); 
         });
         
-        // --- 🛡️ LIMITAZIONE CANDIDATI (V32) ---
-        // Ridotto a 12 per sicurezza massima
+        // --- SAFE MODE LIMIT (12) ---
         const candidates = uniqueResults.slice(0, 12); 
         let streams = [];
 
         console.log(`   ⚡ Processing ${candidates.length} candidates (Safe Mode)...`);
 
         for (const item of candidates) {
-            // --- 🛡️ WAIT PREVENTIVO (V32) ---
-            // Aspettiamo PRIMA di fare qualsiasi cosa.
-            // Questo assicura che anche in caso di continue/error, il tempo passa.
             await wait(600); 
 
             try {
-                // Chiamata RD con protezione
                 let streamData = null;
                 try {
                     streamData = await RD.getStreamLink(config.rd, item.magnet);
                 } catch (rdError) {
-                    console.log("   ⚠️ RD Error. Waiting extra 2s...");
-                    await wait(2000); // Backoff in caso di errore
-                    continue; // Salta al prossimo (dopo il wait iniziale del prossimo giro)
+                    // Error Fallback: Mostra comunque il magnet ma segnala errore
+                    console.log(`   ⚠️ RD Error (${rdError.response?.status || 'Unknown'}). Fallback...`);
+                    const fallbackInfo = Brain.extractInfo(item.title);
+                    streams.push({
+                        name: `[⚠️ Error] ${item.source}\n${fallbackInfo.quality}`,
+                        title: `⚠️ RD Error (${rdError.response?.status || '!'})\n📄 ${item.title}\n💾 ${item.size || "??"}`,
+                        url: item.magnet,
+                        behaviorHints: { notWebReady: true, bin: true }
+                    });
+                    await wait(2000); 
+                    continue; 
                 }
 
-                // ========================================================
-                // 🛑 STRICT MODE: Se non c'è link o non è READY, CANCELLA.
-                // ========================================================
                 if (!streamData) continue; 
                 if (streamData.type !== 'ready' && !streamData.url) continue;
-
-                // Filtro dimensione reale
                 if (streamData.size < REAL_SIZE_FILTER) continue;
 
                 const fileTitle = streamData?.filename || item.title;
@@ -327,6 +303,7 @@ const StreamService = {
                 if (!displayLang) {
                     if (item.source === "Corsaro") displayLang = "ITA 🇮🇹"; 
                     else if (item.source === "UIndex" && item.title.includes("ITA")) displayLang = "ITA 🇮🇹";
+                    else if (item.source === "Knaben" && /ITA|Italian/i.test(item.title)) displayLang = "ITA 🇮🇹";
                     else displayLang = "ENG/MULTI ❓";
                 }
 
@@ -337,9 +314,7 @@ const StreamService = {
                     behaviorHints: { notWebReady: false }
                 });
 
-            } catch (e) {
-                // Ignora errori minori
-            }
+            } catch (e) { }
         }
         return streams;
     }
@@ -384,7 +359,7 @@ app.get('/:userConf/stream/:type/:id.json', async (req, res) => {
 
         const rawResults = await ProviderService.search(metadata, config.filters || {});
         if (rawResults.length === 0) {
-            const noRes = { streams: [{ title: "🚫 Nessun risultato ITA" }] };
+            const noRes = { streams: [{ title: "🚫 Nessun risultato" }] };
             CACHE.streams.set(cacheKey, noRes, 300);
             return res.json(noRes);
         }
@@ -402,5 +377,5 @@ app.get('/:userConf/stream/:type/:id.json', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`🚀 THE BRAIN V32 - SAFE MODE - Port ${PORT}`);
+    console.log(`🚀 THE BRAIN V37 - KNABEN EDITION - Port ${PORT}`);
 });
