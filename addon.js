@@ -16,10 +16,16 @@ const Knaben = require("./knaben");
 const CACHE = {
     streams: new NodeCache({ stdTTL: 1800, checkperiod: 300 }), // 30 min
     catalog: new NodeCache({ stdTTL: 43200, checkperiod: 3600 }), // 12 ore
-    metadata: new NodeCache({ stdTTL: 86400, checkperiod: 3600 }) // 24 ore
+    metadata: new NodeCache({ stdTTL: 86400, checkperiod: 3600 }), // 24 ore
+    rd_results: new NodeCache({ stdTTL: 86400, checkperiod: 3600 }) // Cache verifiche RD
 };
 
-// LISTA TRACKERS DI FALLBACK (Migliora resilienza download su RD)
+// --- BLACKLIST HASH (Magnet spazzatura noti) ---
+const BLACKLIST_HASH = new Set([
+    "AB45F90F12345F00000000000000000000000000", 
+]);
+
+// LISTA TRACKERS DI FALLBACK
 const BEST_TRACKERS = [
     "udp://tracker.opentrackr.org:1337/announce",
     "udp://9.rarbg.to:2920/announce",
@@ -34,12 +40,12 @@ const PORT = process.env.PORT || 7000;
 app.use(cors());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// --- MANIFEST (V31.1 STABLE) ---
+// --- MANIFEST (V31.5 STABLE) ---
 const MANIFEST = {
     id: "org.community.corsaro-brain-v31-stable",
-    version: "31.1.0", 
-    name: "Corsaro + Global (V31 STABLE)",
-    description: "🇮🇹 V31.1: Anime Support + Anti-429 Protection. Ottimizzato per Real-Debrid.",
+    version: "31.5.0", 
+    name: "Corsaro + Global (V31.5 SMART ABORT)",
+    description: "🇮🇹 V31.5: Strategia Smart Abort. Se RD limita, restituisce subito i risultati validi.",
     resources: ["catalog", "stream"],
     types: ["movie", "series", "anime"],
     catalogs: [
@@ -82,8 +88,66 @@ function enrichMagnet(magnet) {
     return magnet + trParams;
 }
 
+function similar(a, b) {
+    if (!a || !b) return 0;
+    a = a.toLowerCase();
+    b = b.toLowerCase();
+    let matches = 0;
+    const wordsA = a.split(/\W+/).filter(w => w.length > 2);
+    const wordsB = b.split(/\W+/).filter(w => w.length > 2);
+    
+    if (wordsA.length === 0) return 0;
+    for (let w of wordsA) {
+        if (wordsB.includes(w)) matches++;
+    }
+    return matches / wordsA.length;
+}
+
+async function limitedMap(list, limit, fn) {
+    const results = [];
+    const executing = [];
+    for (const item of list) {
+        const p = Promise.resolve().then(() => fn(item));
+        results.push(p);
+        if (limit <= list.length) {
+            const e = p.then(() => executing.splice(executing.indexOf(e), 1));
+            executing.push(e);
+            if (executing.length >= limit) await Promise.race(executing);
+        }
+    }
+    return Promise.all(results);
+}
+
+// Wrapper RD con gestione Cache e Errore 429
+async function checkRealDebrid(magnet, rdKey) {
+    if (!magnet) return null;
+    const hashMatch = magnet.match(/btih:([A-F0-9]{40})/i);
+    const hash = hashMatch ? hashMatch[1].toUpperCase() : magnet;
+    
+    if (CACHE.rd_results.has(hash)) {
+        return CACHE.rd_results.get(hash);
+    }
+
+    try {
+        const data = await RD.getStreamLink(rdKey, magnet);
+        if (data && data.type === 'ready') {
+            CACHE.rd_results.set(hash, data);
+        }
+        return data;
+    } catch (e) {
+        // Rilanciamo l'errore SOLO se è un 429 (Rate Limit) per gestirlo nel loop principale
+        const isRateLimit = (e.message && e.message.includes('429')) || 
+                            (e.response && e.response.status === 429);
+        
+        if (isRateLimit) {
+            throw new Error('429_RATE_LIMIT');
+        }
+        return null;
+    }
+}
+
 // ==========================================
-// 🧠 THE BRAIN: MATCHING INTELLIGENTE V2
+// 🧠 THE BRAIN: MATCHING INTELLIGENTE
 // ==========================================
 
 const Brain = {
@@ -104,13 +168,11 @@ const Brain = {
         const e = parseInt(episode);
         const sStr = String(s).padStart(2, '0');
 
-        // 1. ANIME / ABSOLUTE NUMBERING
         if (isAnime) {
             const absoluteRegex = new RegExp(`(?:\\s|\\.|_|\\[|#)${e}(?:\\s|\\.|_|\\]|v\\d|$)`, 'i');
             if (absoluteRegex.test(title)) return true;
         }
 
-        // 2. CHECK MULTI-STAGIONE (Range S01-S03)
         const multiSeasonRegex = /(?:s|stagion[ie]|seasons?)\s*(\d{1,2})\s*(?:a|to|thru|e|-)\s*(?:s|stagion[ie]|seasons?)?\s*(\d{1,2})/i;
         const multiMatch = title.match(multiSeasonRegex);
         if (multiMatch) {
@@ -126,12 +188,10 @@ const Brain = {
             if (s >= start && s <= end) return true;
         }
 
-        // 3. CHECK STAGIONE SPECIFICA
         const seasonPatterns = [
             `s${sStr}`, `s${s} `, `stagione ${s}`, `stagione ${sStr}`,  
             `${s}\\^ stagione`, `season ${s}`, `serie completa`, `complete series`
         ];
-
         const hasSeason = seasonPatterns.some(p => title.includes(p));
         
         if (!hasSeason && !isAnime) {
@@ -140,12 +200,10 @@ const Brain = {
             }
         }
 
-        // PACK DETECTION
         if (hasSeason && (title.includes("pack") || title.includes("completa") || title.includes("complete") || title.includes("tutta"))) {
             return true;
         }
 
-        // 4. CHECK EPISODIO
         const epMatch = title.match(/\b(?:e|ep|episodio|x)\s*(\d{1,3})\b/i);
         if (epMatch) {
             const foundEp = parseInt(epMatch[1]);
@@ -174,7 +232,6 @@ const Brain = {
         if (t.includes("multi") || t.includes("mux") || t.includes("mxt")) lang.push("MULTI 🌐");
         if (lang.length === 0) lang.push("ENG/SUB 🇬🇧");
         
-        // AUDIO DETECTION
         let audio = "";
         if (t.match(/ac3|dd5\.1|5\.1|dts/)) audio = "🔊 5.1";
         else if (t.match(/aac|2\.0|stereo/)) audio = "🔊 2.0";
@@ -233,9 +290,8 @@ const MetadataService = {
 
 const ProviderService = {
     search: async (metadata, filters) => {
-        let queries = [];
+        let queries = new Set();
         const searchYear = metadata.isSeries ? null : metadata.year;
-        
         const cleanTitle = cleanSearchQuery(metadata.title);
         const isShortTitle = cleanTitle.length < 4; 
 
@@ -243,62 +299,45 @@ const ProviderService = {
             const s = String(metadata.season).padStart(2, '0');
             const e = String(metadata.episode).padStart(2, '0'); 
 
-            queries.push(`${metadata.title} ITA`);
-            queries.push(`${metadata.title} Stagione ${metadata.season}`);
-            queries.push(`${metadata.title} S${s}`);
-            queries.push(`${metadata.title} stagione ${metadata.season} pack ita`);
-            queries.push(`${metadata.title} S${s} completa ita`);
+            queries.add(`${metadata.title} ITA`);
+            queries.add(`${metadata.title} S${s}`);
+            queries.add(`${metadata.title} stagione ${metadata.season}`);
             
             if (metadata.isAnime) {
-                queries.push(`${metadata.title} ${metadata.episode}`);
-                queries.push(`${metadata.title} ${metadata.episode} ITA`);
+                queries.add(`${metadata.title} ${metadata.episode}`);
+                queries.add(`${metadata.title} ${metadata.episode} ITA`);
             } else {
-                queries.push(`${metadata.title} ${metadata.season}x${e} ita`);
+                queries.add(`${metadata.title} ${metadata.season}x${e} ita`);
+                queries.add(`${metadata.title} S${s}E${e}`);
             }
 
             if (metadata.originalTitle && metadata.originalTitle !== metadata.title) {
-                queries.push(`${metadata.originalTitle} ITA`);
-                queries.push(`${metadata.originalTitle} S${s}`);
-                if (metadata.isAnime) queries.push(`${metadata.originalTitle} ${metadata.episode}`);
+                queries.add(`${metadata.originalTitle} ITA`);
+                queries.add(`${metadata.originalTitle} S${s}`);
+                if (metadata.isAnime) queries.add(`${metadata.originalTitle} ${metadata.episode}`);
             }
         } else {
-            if (!isShortTitle) queries.push(`${metadata.title} ITA`);
-            queries.push(`${metadata.title} ${metadata.year}`);
-            queries.push(`${metadata.title} ITA ${metadata.year}`); 
+            if (!isShortTitle) queries.add(`${metadata.title} ITA`);
+            queries.add(`${metadata.title} ${metadata.year}`);
             if (metadata.originalTitle && metadata.originalTitle !== metadata.title) {
-                queries.push(`${metadata.originalTitle} ITA`);
-                queries.push(`${metadata.originalTitle} ${metadata.year}`);
+                queries.add(`${metadata.originalTitle} ITA`);
+                queries.add(`${metadata.originalTitle} ${metadata.year}`);
             }
         }
 
-        queries = [...new Set(queries)];
-        console.log(`   🔍 Queries: ${JSON.stringify(queries)}`);
+        const uniqueQueries = Array.from(queries);
+        console.log(`   🔍 Queries Uniche: ${JSON.stringify(uniqueQueries)}`);
 
-        let promises = [];
-
-        queries.forEach(q => {
-            promises.push(Corsaro.searchMagnet(q, searchYear).catch(() => []));
-            promises.push(UIndex.searchMagnet(q, searchYear).catch(() => []));
+        let tasks = [];
+        uniqueQueries.forEach(q => {
+            tasks.push(() => Corsaro.searchMagnet(q, searchYear).catch(() => []));
+            tasks.push(() => UIndex.searchMagnet(q, searchYear).catch(() => []));
+            tasks.push(() => Knaben.searchMagnet(q, searchYear).catch(() => []));
+            tasks.push(() => TorrentMagnet.searchMagnet(q, searchYear).catch(() => []));
+            tasks.push(() => Apibay.searchMagnet(q, searchYear).catch(() => []));
         });
 
-        if (!filters.onlyIta) {
-            let globalQuery = metadata.isSeries 
-                ? `${cleanTitle} S${String(metadata.season).padStart(2,'0')}` 
-                : `${cleanTitle} ${metadata.year}`; 
-            
-            if (metadata.isAnime) globalQuery = `${cleanTitle} ${metadata.episode}`;
-            const itaQuery = `${cleanSearchQuery(metadata.title)} ITA`;
-
-            promises.push(Knaben.searchMagnet(globalQuery, searchYear).catch(() => []));
-            promises.push(Knaben.searchMagnet(itaQuery, searchYear).catch(() => []));
-            promises.push(Apibay.searchMagnet(globalQuery, searchYear).catch(() => []));
-            promises.push(TorrentMagnet.searchMagnet(globalQuery, searchYear).catch(() => []));
-        } else {
-             const itaQuery = `${cleanSearchQuery(metadata.title)} ITA`;
-             promises.push(Knaben.searchMagnet(itaQuery, searchYear).catch(() => []));
-        }
-
-        const resultsArray = await Promise.all(promises);
+        const resultsArray = await limitedMap(tasks, 4, (task) => task());
         return resultsArray.flat();
     }
 };
@@ -312,11 +351,20 @@ const StreamService = {
         for (const item of results) {
             const hashMatch = item.magnet.match(/btih:([A-F0-9]{40})/i);
             const hash = hashMatch ? hashMatch[1].toUpperCase() : null;
+            
+            if (hash && BLACKLIST_HASH.has(hash)) continue;
+            if (similar(metadata.title, item.title) < 0.35) continue;
+
+            if (filters.onlyIta) {
+                if (!/ita|sub ita|italian|ita mux|vose/i.test(item.title)) continue;
+            }
+
             if (hash && !uniqueMap.has(hash)) {
                 item.magnet = enrichMagnet(item.magnet);
                 uniqueMap.set(hash, item);
             }
         }
+        
         let uniqueResults = Array.from(uniqueMap.values());
 
         if (metadata.isSeries) {
@@ -337,56 +385,73 @@ const StreamService = {
             return (b.sizeBytes || 0) - (a.sizeBytes || 0);
         });
         
-        // 🛡️ SICUREZZA ANTI-429: Processa max 30 risultati
         const candidates = uniqueResults.slice(0, 30); 
         let streams = [];
 
         console.log(`   ⚡ RD Checking ${candidates.length} candidates...`);
 
+        // --- SMART ABORT STRATEGY ---
+        let stopScanning = false;
+
         for (const item of candidates) {
+            // Se abbiamo attivato il flag di stop, usciamo subito dal loop
+            if (stopScanning) break;
+
+            let streamData = null;
+
             try {
-                // 1. Richiesta a RD
-                const streamData = await RD.getStreamLink(config.rd, item.magnet);
-                
-                // 2. PAUSA TATTICA (Anti-429)
-                await wait(250); 
-
-                if (!streamData) continue;
-                if (streamData.type !== 'ready') continue;
-                if (streamData.size < REAL_SIZE_FILTER) continue;
-
-                const fileTitle = streamData.filename || item.title;
-                const finalInfo = Brain.extractInfo(fileTitle); 
-
-                let displayLang = finalInfo.lang.join(" / ");
-                if (!displayLang) {
-                    if (item.source.includes("Corsaro")) displayLang = "ITA 🇮🇹";
-                    else if (item.source.includes("UIndex") && item.title.includes("ITA")) displayLang = "ITA 🇮🇹";
-                    else displayLang = "ENG/MULTI ❓";
-                }
-
-                let nameTag = `[RD ⚡] ${item.source}\n${finalInfo.quality}`;
-                let titleStr = `${fileTitle}\n`;
-                titleStr += `💾 ${formatBytes(streamData.size)} `;
-                if (finalInfo.audio) titleStr += `${finalInfo.audio}\n`;
-                else titleStr += "\n";
-                titleStr += `🔊 ${displayLang}`;
-
-                streams.push({
-                    name: nameTag,
-                    title: titleStr,
-                    url: streamData.url,
-                    behaviorHints: { notWebReady: false }
-                });
-                
+                streamData = await checkRealDebrid(item.magnet, config.rd);
             } catch (e) {
-                // 3. GESTIONE RATE LIMIT
-                if (e.message && e.message.includes('429')) {
-                    console.log("⚠️ RD RATE LIMIT! Raffreddamento 2 secondi...");
-                    await wait(2000); 
+                if (e.message === '429_RATE_LIMIT') {
+                    console.warn("🛑 RD RATE LIMIT HIT. Stop scansione per salvare API.");
+                    console.warn("   Restituisco i risultati trovati finora.");
+                    // Attiviamo lo stop: non proviamo più nessun altro link in questa richiesta.
+                    stopScanning = true; 
+                    // Non serve break qui, il check all'inizio del loop bloccherà il prossimo
                 }
             }
+
+            // PAUSA STANDARD (500ms): Bilanciata
+            await wait(500); 
+
+            if (!streamData) continue;
+            if (streamData.type !== 'ready') continue;
+            if (streamData.size < REAL_SIZE_FILTER) continue;
+
+            const fileTitle = streamData.filename || item.title;
+            const finalInfo = Brain.extractInfo(fileTitle); 
+
+            let displayLang = finalInfo.lang.join(" / ");
+            if (!displayLang) {
+                if (item.source.includes("Corsaro")) displayLang = "ITA 🇮🇹";
+                else if (item.source.includes("UIndex") && item.title.includes("ITA")) displayLang = "ITA 🇮🇹";
+                else displayLang = "ENG/MULTI ❓";
+            }
+
+            let nameTag = `[RD ⚡] ${item.source}\n${finalInfo.quality}`;
+            let titleStr = `${fileTitle}\n`;
+            titleStr += `💾 ${formatBytes(streamData.size)} `;
+            if (finalInfo.audio) titleStr += `${finalInfo.audio}\n`;
+            else titleStr += "\n";
+            titleStr += `🔊 ${displayLang}`;
+
+            streams.push({
+                name: nameTag,
+                title: titleStr,
+                url: streamData.url,
+                behaviorHints: { notWebReady: false }
+            });
         }
+
+        if (stopScanning && streams.length === 0) {
+            // Se ci siamo fermati subito e non abbiamo nulla, aggiungiamo un avviso
+            streams.push({
+                name: "[⚠️ RD LIMIT]",
+                title: "Rate Limit raggiunto.\nRiprova tra poco.",
+                url: "#"
+            });
+        }
+
         return streams;
     }
 };
@@ -448,5 +513,5 @@ app.get('/:userConf/stream/:type/:id.json', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`🚀 BRAIN V31.1 (ANTI-429) - Port ${PORT}`);
+    console.log(`🚀 BRAIN V31.5 (SMART ABORT) - Port ${PORT}`);
 });
