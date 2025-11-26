@@ -1,146 +1,81 @@
 const axios = require("axios");
 
-const RD_API = "https://api.real-debrid.com/rest/1.0";
-const TIMEOUT = 20000; // 20 Secondi
+const RD_TIMEOUT = 60000; 
 
-class RealDebridClient {
-    constructor(apiKey) {
-        this.apiKey = apiKey;
-        this.headers = {
-            'Authorization': `Bearer ${apiKey}`,
-            'Content-Type': 'application/x-www-form-urlencoded'
+async function rdRequest(method, url, token, data = null) {
+    try {
+        const config = {
+            method,
+            url,
+            headers: { Authorization: `Bearer ${token}` },
+            timeout: RD_TIMEOUT
         };
+        if (data) config.data = data;
+        const response = await axios(config);
+        return response.data;
+    } catch (error) {
+        if (method === 'POST' && url.includes('addMagnet') && error.response?.status === 400) return null;
+        throw error;
     }
+}
 
-    async request(method, endpoint, data = null) {
+const RD = {
+    // --- NUOVA FUNZIONE PER VELOCITÀ ---
+    checkInstantAvailability: async (token, hashes) => {
         try {
-            const config = {
-                method,
-                url: `${RD_API}${endpoint}`,
-                headers: this.headers,
-                timeout: TIMEOUT
-            };
-
-            if (data) {
-                const params = new URLSearchParams();
-                for (const key in data) params.append(key, data[key]);
-                config.data = params;
-            }
-
-            const response = await axios(config);
-            return response.data;
-        } catch (error) {
-            if (error.response) {
-                const status = error.response.status;
-                if (status === 401) throw new Error("RD_INVALID_TOKEN");
-                if (status === 403) throw new Error("RD_PERMISSION_DENIED");
-                if (status === 503) throw new Error("RD_SERVICE_UNAVAILABLE");
-            }
-            throw error;
+            // RD API vuole gli hash uniti da /
+            const hashString = hashes.join('/');
+            const url = `https://api.real-debrid.com/rest/1.0/torrents/instantAvailability/${hashString}`;
+            const data = await rdRequest('GET', url, token);
+            return data || {};
+        } catch (e) {
+            console.log("⚠️ Instant Check Error:", e.message);
+            return {};
         }
-    }
+    },
 
-    // --- NUOVO: CONTROLLO BATCH DISPONIBILITÀ ---
-    async checkInstantAvailability(hashes) {
-        // RD accetta hash multipli separati da /
-        const path = `/torrents/instantAvailability/${hashes.join('/')}`;
-        return this.request('GET', path);
-    }
-
-    async addMagnet(magnet) { return this.request('POST', '/torrents/addMagnet', { magnet }); }
-    async selectFiles(torrentId, files = 'all') { return this.request('POST', `/torrents/selectFiles/${torrentId}`, { files }); }
-    async getInfo(torrentId) { return this.request('GET', `/torrents/info/${torrentId}`); }
-    async unrestrictLink(link) { return this.request('POST', '/unrestrict/link', { link }); }
-}
-
-/**
- * NUOVA FUNZIONE: Controlla se i magnet sono già in cache (Senza aggiungerli)
- * Restituisce una mappa degli hash disponibili.
- */
-async function checkBatchAvailability(apiKey, hashes) {
-    if (!hashes || hashes.length === 0) return {};
-    const rd = new RealDebridClient(apiKey);
-    try {
-        return await rd.checkInstantAvailability(hashes);
-    } catch (error) {
-        console.error("⚠️ RD Batch Check Error:", error.message);
-        return {}; // Ritorna vuoto in caso di errore per non bloccare il flusso
-    }
-}
-
-/**
- * LOGICA INTELLIGENTE DI SELEZIONE FILE E UNRESTRICT
- * (Da chiamare SOLO se il file è confermato come Cached)
- */
-async function getStreamLink(apiKey, magnetLink) {
-    const rd = new RealDebridClient(apiKey);
-    let torrentId;
-
-    try {
-        // 1. AGGIUNTA MAGNET
-        const added = await rd.addMagnet(magnetLink);
-        torrentId = added.id;
-
-        // 2. VERIFICA E SELEZIONE
-        let info = await rd.getInfo(torrentId);
-
-        if (info.status === 'waiting_files_selection') {
-            const videoExtensions = ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv'];
-            const junkKeywords = ['sample', 'trailer', 'extra', 'bonus'];
-
-            // Filtra solo video validi e grossi (>50MB)
-            const videoFiles = info.files.filter(f => {
-                const lowerPath = f.path.toLowerCase();
-                return videoExtensions.some(ext => lowerPath.endsWith(ext)) &&
-                       !junkKeywords.some(junk => lowerPath.includes(junk)) &&
-                       f.bytes > 50 * 1024 * 1024; 
-            });
-
-            if (videoFiles.length > 0) {
-                const fileIds = videoFiles.map(f => f.id).join(',');
-                await rd.selectFiles(torrentId, fileIds);
-            } else {
-                await rd.selectFiles(torrentId, 'all');
-            }
+    getStreamLink: async (token, magnet) => {
+        try {
+            const addUrl = "https://api.real-debrid.com/rest/1.0/torrents/addMagnet";
+            const body = new URLSearchParams();
+            body.append("magnet", magnet);
             
-            // Piccola pausa tecnica per dare tempo a RD di processare la selezione
-            // (A volte serve un minimo di latenza lato server)
-            info = await rd.getInfo(torrentId); 
-        } 
-        
-        // Se non è downloaded immediato dopo la selezione, è un falso positivo della cache
-        // o serve tempo. Ma per un addon "Instant", se non è pronto ora, lo scartiamo.
-        if (info.status !== 'downloaded') {
-             // Opzionale: cancellare il torrent per pulizia
-             return null; 
-        }
+            const addRes = await rdRequest('POST', addUrl, token, body);
+            if (!addRes || !addRes.id) throw new Error("Add Failed");
+            const torrentId = addRes.id;
 
-        // 3. UNRESTRICT
-        // Prende il file più grande selezionato
-        const files = info.files.filter(f => f.selected === 1).sort((a, b) => b.bytes - a.bytes);
-        if (!files.length) return null;
+            let info = await rdRequest('GET', `https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, token);
+            
+            if (info.status === 'waiting_files_selection') {
+                const selUrl = `https://api.real-debrid.com/rest/1.0/torrents/selectFiles/${torrentId}`;
+                const selBody = new URLSearchParams();
+                selBody.append("files", "all");
+                await rdRequest('POST', selUrl, token, selBody);
+                info = await rdRequest('GET', `https://api.real-debrid.com/rest/1.0/torrents/info/${torrentId}`, token);
+            }
 
-        const mainFile = files[0];
-        
-        // Logica per trovare il link giusto:
-        // RD spesso mette i link nello stesso ordine degli ID, ma non sempre.
-        // Un approccio sicuro è provare a sbloccare il primo link generato.
-        const targetLink = info.links[0]; 
-        
-        const stream = await rd.unrestrictLink(targetLink);
+            if (info.status === 'downloaded' && info.links && info.links.length > 0) {
+                // Prende il file più grande
+                const videoFiles = info.files.filter(f => f.selected && f.bytes > 10 * 1024 * 1024);
+                // Logica semplice: prendiamo il primo link sbloccabile
+                const linkToUnrestrict = info.links[0]; 
 
-        return {
-            type: 'ready',
-            url: stream.download,
-            filename: stream.filename,
-            size: stream.filesize
-        };
+                const unrestrictUrl = "https://api.real-debrid.com/rest/1.0/unrestrict/link";
+                const unResBody = new URLSearchParams();
+                unResBody.append("link", linkToUnrestrict);
+                
+                const unrestrictRes = await rdRequest('POST', unrestrictUrl, token, unResBody);
 
-    } catch (error) {
-        if (error.message === "RD_INVALID_TOKEN") return { type: 'error', message: "API Key RD Errata" };
-        console.error(`RD Error for magnet: ${error.message}`);
-        return null; 
+                return {
+                    type: 'ready',
+                    url: unrestrictRes.download,
+                    filename: unrestrictRes.filename,
+                    size: unrestrictRes.filesize
+                };
+            }
+            return null;
+        } catch (e) { throw e; }
     }
-}
+};
 
-module.exports = { getStreamLink, checkBatchAvailability };
+module.exports = RD;
