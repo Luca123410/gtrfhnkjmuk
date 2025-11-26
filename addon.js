@@ -9,7 +9,8 @@ const RD = require("./rd");
 const Corsaro = require("./corsaro");
 const Apibay = require("./1337x");
 const UIndex = require("./uindex"); 
-const Knaben = require("./knaben"); 
+const Knaben = require("./knaben");
+const kitsuHandler = require("./kitsu"); // <--- NUOVO MODULO KITSU
 
 // --- CONFIGURAZIONE CACHE ---
 const CACHE = {
@@ -27,13 +28,13 @@ app.use(express.static(path.join(__dirname, 'public')));
 // --- MANIFEST ---
 const MANIFEST = {
     id: "org.community.corsaro-brain-v37",
-    version: "37.0.0", 
-    name: "Corsaro + Global (V37 Knaben)",
-    description: "🇮🇹 V37: Motore Knaben (stile Corsaro Viola). Hybrid Search V23. Safe Mode.",
+    version: "37.1.0", 
+    name: "Corsaro + Global (V37 Knaben+Anime)",
+    description: "🇮🇹 V37.1: Motore Knaben + Supporto Kitsu Anime. Hybrid Search. Safe Mode.",
     resources: ["catalog", "stream"],
-    types: ["movie", "series"],
+    types: ["movie", "series", "anime"], // Aggiunto anime per sicurezza
     catalogs: [{ type: "movie", id: "tmdb_trending", name: "Popolari Italia" }],
-    idPrefixes: ["tmdb", "tt"],
+    idPrefixes: ["tmdb", "tt", "kitsu"], // <--- AGGIUNTO KITSU QUI
     behaviorHints: { configurable: true, configurationRequired: true }
 };
 
@@ -147,30 +148,71 @@ const MetadataService = {
     get: async (id, type, tmdbKey) => {
         const cacheKey = `meta:${type}:${id}`;
         if (CACHE.metadata.has(cacheKey)) return CACHE.metadata.get(cacheKey);
+        
         try {
             let tmdbId = id;
             let seasonNum, episodeNum;
-            if (type === 'series' && id.includes(':')) {
+
+            // --- GESTIONE KITSU (Nuova Integrazione) ---
+            if (id.startsWith("kitsu:")) {
+                // Formato tipico: kitsu:ID_ANIME:EPISODIO (es. kitsu:1234:5)
+                const parts = id.split(":");
+                const kitsuIdClean = parts[1];
+                const kitsuEp = parts[2] ? parseInt(parts[2]) : 1;
+
+                console.log(`👹 Kitsu Detected: ID ${kitsuIdClean} Ep ${kitsuEp}`);
+                
+                // Usiamo il nuovo handler
+                const conversion = await kitsuHandler(kitsuIdClean);
+                
+                if (conversion && conversion.imdbID) {
+                    console.log(`   ✅ Kitsu -> IMDB: ${conversion.imdbID}`);
+                    tmdbId = conversion.imdbID; // Ora abbiamo un tt1234567
+
+                    // Se il mapping ci dà una stagione specifica, usiamola
+                    if (conversion.season) {
+                        seasonNum = conversion.season;
+                        // Nota: Qui assumiamo che l'episodio richiesto (kitsuEp) corrisponda 
+                        // all'episodio all'interno della stagione mappata.
+                        episodeNum = kitsuEp; 
+                        
+                        // Forziamo il tipo a serie perché Kitsu è quasi sempre serie/anime
+                        type = 'series'; 
+                    } else {
+                        // Se è un film anime o non c'è mapping stagione
+                         if (conversion.imdbID) tmdbId = conversion.imdbID;
+                    }
+                } else {
+                    console.log("   ❌ Kitsu Conversion Failed. Tentativo con ID originale (probabilmente fallirà).");
+                }
+            }
+            // --- FINE GESTIONE KITSU ---
+
+            // Gestione standard Series (tt o tmdb) - Solo se non è già stato gestito da Kitsu o se è standard
+            if (type === 'series' && id.includes(':') && !seasonNum) {
                 const parts = id.split(':');
                 tmdbId = parts[0];
                 seasonNum = parseInt(parts[1]);
                 episodeNum = parseInt(parts[2]);
             }
+
             let details;
+            // Recupero Dettagli da TMDB (che ora funzionerà anche per Kitsu convertiti in tt...)
             if (tmdbId.startsWith('tt')) {
                 const res = await axios.get(`https://api.themoviedb.org/3/find/${tmdbId}?api_key=${tmdbKey}&language=it-IT&external_source=imdb_id`);
-                details = (type === 'movie') ? res.data.movie_results[0] : res.data.tv_results[0];
+                details = (type === 'movie' || !res.data.tv_results.length) ? res.data.movie_results[0] : res.data.tv_results[0];
             } else if (tmdbId.startsWith('tmdb:')) {
                 const cleanId = tmdbId.split(':')[1];
                 const res = await axios.get(`https://api.themoviedb.org/3/${type === 'movie' ? 'movie' : 'tv'}/${cleanId}?api_key=${tmdbKey}&language=it-IT`);
                 details = res.data;
             }
+
             if (details) {
                 const meta = {
                     title: details.title || details.name,
                     originalTitle: details.original_title || details.original_name,
                     year: (details.release_date || details.first_air_date)?.split('-')[0],
-                    isSeries: type === 'series',
+                    isSeries: type === 'series' || !!seasonNum, // È serie se il tipo lo dice O se abbiamo una stagione
                     season: seasonNum,
                     episode: episodeNum
                 };
@@ -178,7 +220,10 @@ const MetadataService = {
                 return meta;
             }
             return null;
-        } catch (e) { return null; }
+        } catch (e) { 
+            console.log("Metadata Error:", e.message);
+            return null; 
+        }
     }
 };
 
@@ -204,7 +249,7 @@ const ProviderService = {
         }
 
         queries = [...new Set(queries)].map(q => cleanSearchQuery(q));
-        console.log(`   🔍 Strategies (V37 Knaben): ${JSON.stringify(queries)}`);
+        console.log(`   🔍 Strategies: ${JSON.stringify(queries)}`);
 
         let promises = [];
         const searchYear = metadata.isSeries ? null : metadata.year;
@@ -214,7 +259,7 @@ const ProviderService = {
             promises.push(Corsaro.searchMagnet(q, searchYear).catch(() => []));
             promises.push(UIndex.searchMagnet(q, searchYear).catch(() => []));
             
-            // 2. Global Providers (Knaben è il re qui, come in Corsaro Viola)
+            // 2. Global Providers (Knaben è il re qui)
             if (!filters.onlyIta) {
                 promises.push(Knaben.searchMagnet(q, searchYear).catch(() => [])); 
                 promises.push(Apibay.searchMagnet(q, searchYear).catch(() => []));
@@ -279,7 +324,6 @@ const StreamService = {
                 try {
                     streamData = await RD.getStreamLink(config.rd, item.magnet);
                 } catch (rdError) {
-                    // Error Fallback: Mostra comunque il magnet ma segnala errore
                     console.log(`   ⚠️ RD Error (${rdError.response?.status || 'Unknown'}). Fallback...`);
                     const fallbackInfo = Brain.extractInfo(item.title);
                     streams.push({
@@ -377,5 +421,5 @@ app.get('/:userConf/stream/:type/:id.json', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-    console.log(`🚀 THE BRAIN V37 - KNABEN EDITION - Port ${PORT}`);
+    console.log(`🚀 THE BRAIN V37.1 - KNABEN + ANIME - Port ${PORT}`);
 });
